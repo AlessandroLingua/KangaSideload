@@ -1,0 +1,403 @@
+"""Client di autenticazione Apple GrandSlam (GSA) per Apple ID.
+
+Implementa il protocollo documentato su The Apple Wiki
+(https://theapplewiki.com/wiki/Grand_Slam_Authentication):
+
+  1. POST /grandslam/GsService2  {o: init,  u, A2k, ps:[s2k,s2k_fo], cpd}
+  2. POST /grandslam/GsService2  {o: complete, u, c, M1, cpd}
+     -> M2 + spd (cifrata: AES-256-CBC con chiavi HMAC derivate dalla
+        session key SRP)
+  3. (se 2FA) GET /auth/verify/trusteddevice per far arrivare il codice
+     sul device fidato, poi GET /grandslam/GsService2/validate con header
+     `security-code`, infine si ri-esegue init/complete per ottenere i token.
+
+Credenziali: mai salvate. La sessione risultante (cookies + dsid + token)
+viene restituita al chiamante che la persiste con store.py.
+
+SRP-6a: variante Apple — SHA-256, gruppo 2048 (RFC5054), x senza username,
+password pre-hashata con s2k (PBKDF2-HMAC-SHA256 su SHA256(password),
+oppure la variante "s2k_fo" con hex-intermediario).
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import logging
+import platform
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+import plistlib
+import requests
+
+from . import _vendor  # noqa: F401  (fa registrare il package vendorizzato)
+from ._vendor import srp
+from ._vendor.srp import NG_2048, SHA256
+
+logger = logging.getLogger(__name__)
+
+GSA_URL = "https://gsa.apple.com/grandslam/GsService2"
+GSA_VERIFY_TRUSTED_DEVICE = "https://gsa.apple.com/auth/verify/trusteddevice"
+GSA_VALIDATE = "https://gsa.apple.com/grandslam/GsService2/validate"
+
+USER_AGENT = "akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0"
+CLIENT_INFO = "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"
+
+
+class GsaError(RuntimeError):
+    """Errore di autenticazione GrandSlam (credenziali, Apple anisette, rete)."""
+
+    def __init__(self, message: str, apple_code: int | None = None, needs_2fa: bool = False):
+        super().__init__(message)
+        self.apple_code = apple_code
+        self.needs_2fa = needs_2fa
+
+
+@dataclass
+class AppleSession:
+    """Sessione autenticata: cookies Apple + dati account decifrati."""
+
+    cookies: dict[str, str] = field(default_factory=dict)
+    dsid: str = ""
+    adsid: str = ""
+    tokens: dict[str, str] = field(default_factory=dict)  # es. com.apple.gs.idms.pet
+    account_info: dict = field(default_factory=dict)  # spd decifrata completa
+    sk: bytes = b""  # session key per lo scambio apptokens (base64 in spd)
+    xcode_token: str = ""  # X-Apple-GS-Token (com.apple.gs.xcode.auth)
+
+    @property
+    def logged_in(self) -> bool:
+        return bool(self.cookies.get("myacinfo"))
+
+
+def s2k_hash(password: str, salt: bytes, iterations: int, protocol: str) -> bytes:
+    """Derivazione password Apple (s2k / s2k_fo).
+
+    s2k:     SHA256(password) -> PBKDF2-HMAC-SHA256(salt, iterations, 32 byte)
+    s2k_fo:  come sopra ma con l'hash esadecimale ASCII come password PBKDF2
+    """
+    p = hashlib.sha256(password.encode("utf-8")).digest()
+    if protocol == "s2k_fo":
+        p = p.hex().encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", p, salt, iterations, 32)
+
+
+def _hmac_session_key(session_key: bytes, name: str) -> bytes:
+    return hmac.new(session_key, name.encode(), hashlib.sha256).digest()
+
+
+def decrypt_spd(session_key: bytes, spd: bytes) -> bytes:
+    """Decifra il blob 'spd' (AES-256-CBC + PKCS7)."""
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    key = _hmac_session_key(session_key, "extra data key:")
+    iv = _hmac_session_key(session_key, "extra data iv:")[:16]
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    padded = decryptor.update(spd) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
+
+
+def apple_ca_bundle() -> str:
+    """Percorso dei root CA Apple (gsa.apple.com usa la PKI Apple, non CA pubbliche).
+
+    Riutilizza il bundle che il pacchetto 'anisette' include già.
+    """
+    import anisette as _anisette
+    from pathlib import Path
+
+    pem = Path(_anisette.__file__).parent / "apple-root.pem"
+    if not pem.exists():
+        raise GsaError("apple-root.pem non trovato nel pacchetto anisette")
+    return str(pem)
+
+
+class GsaClient:
+    def __init__(self, anisette_getter, timeout: float = 30.0):
+        """anisette_getter: callable -> dict con gli header anisette."""
+        self._get_anisette = anisette_getter
+        self._timeout = timeout
+        self._session = requests.Session()
+        self._session.verify = apple_ca_bundle()
+        self._local_user_id = str(uuid.uuid4()).upper()
+        self._device_id = str(uuid.uuid4()).upper()
+
+    # ------------------------------------------------------------------ HTTP
+    def _meta_headers(self) -> dict[str, str]:
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        locale = "it_IT"
+        return {
+            "X-Apple-I-Client-Time": now,
+            "X-Apple-I-TimeZone": "Europe/Rome",
+            "X-Apple-Locale": locale,
+            "loc": locale,
+            "X-Apple-I-MD-RINFO": "17106176",
+            "X-Apple-I-MD-LU": base64.b64encode(self._local_user_id.encode()).decode(),
+            "X-Mme-Device-Id": self._device_id,
+            "X-Apple-I-SRL-NO": "0",
+        }
+
+    def _cpd(self) -> dict:
+        """Client Provided Data: meta + anisette uniti (come richiede GSA)."""
+        cpd = {
+            "bootstrap": True,
+            "icscrec": True,
+            "pbe": False,
+            "prkgen": True,
+            "svct": "iCloud",
+        }
+        cpd.update(self._meta_headers())
+        cpd.update(self._get_anisette())
+        return cpd
+
+    def _gsa_request(self, params: dict) -> dict:
+        body = {
+            "Header": {"Version": "1.0.1"},
+            "Request": {"cpd": self._cpd(), **params},
+        }
+        headers = {
+            "Content-Type": "text/x-xml-plist",
+            "Accept": "*/*",
+            "User-Agent": USER_AGENT,
+            "X-MMe-Client-Info": CLIENT_INFO,
+        }
+        resp = self._session.post(
+            GSA_URL,
+            headers=headers,
+            data=plistlib.dumps(body, fmt=plistlib.FMT_XML),
+            timeout=self._timeout,
+        )
+        if resp.status_code == 503:
+            raise GsaError(
+                "Apple sta respingendo le richieste di login da questo tipo di "
+                "anisette (HTTP 503 all'endpoint GsService2 — famiglia errori "
+                "-80045/-80046, ondata da ottobre 2025). Soluzioni: usa una "
+                "sessione anisette diversa/più recente, prova più tardi, oppure "
+                "configura un server anisette remoto nelle impostazioni."
+            )
+        resp.raise_for_status()
+        data = plistlib.loads(resp.content)
+        if "Response" not in data:
+            raise GsaError("Risposta GSA non valida (nessun campo Response)")
+        return data["Response"]
+
+    # --------------------------------------------------------------- 2FA
+    def trigger_2fa(self) -> None:
+        """Chiede ad Apple di inviare il codice 2FA sui device fidati."""
+        identity_token = self._identity_token()
+        headers = {
+            "Content-Type": "text/x-xml-plist",
+            "User-Agent": "Xcode",
+            "Accept": "text/x-xml-plist",
+            "Accept-Language": "en-us",
+            "X-Apple-Identity-Token": identity_token,
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "X-Xcode-Version": "11.2 (11B41)",
+            "X-MMe-Client-Info": CLIENT_INFO,
+        }
+        headers.update(self._meta_headers())
+        headers.update(self._get_anisette())
+        resp = self._session.get(GSA_VERIFY_TRUSTED_DEVICE, headers=headers, timeout=self._timeout)
+        logger.info("2FA: codice inviato ai dispositivi fidati (HTTP %s)", resp.status_code)
+
+    def submit_2fa_code(self, code: str) -> None:
+        """Valida il codice a 6 cifre ricevuto dal device fidato."""
+        identity_token = self._identity_token()
+        headers = {
+            "Content-Type": "text/x-xml-plist",
+            "User-Agent": "Xcode",
+            "Accept": "text/x-xml-plist",
+            "Accept-Language": "en-us",
+            "X-Apple-Identity-Token": identity_token,
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "X-Xcode-Version": "11.2 (11B41)",
+            "X-MMe-Client-Info": CLIENT_INFO,
+            "security-code": code.strip(),
+        }
+        headers.update(self._meta_headers())
+        headers.update(self._get_anisette())
+        resp = self._session.get(GSA_VALIDATE, headers=headers, timeout=self._timeout)
+        if not resp.ok:
+            raise GsaError(f"Codice 2FA rifiutato (HTTP {resp.status_code}). Riprova con un nuovo codice.")
+
+    def _identity_token(self) -> str:
+        dsid = getattr(self, "_pending_dsid", "")
+        idms_token = getattr(self, "_pending_idms_token", "")
+        if not dsid or not idms_token:
+            raise GsaError("Token 2FA non disponibili: esegui prima il login")
+        return base64.b64encode(f"{dsid}:{idms_token}".encode()).decode()
+
+    # --------------------------------------------------------------- login
+    def login(self, apple_id: str, password: str, on_2fa=None) -> AppleSession:
+        """Login completo. on_2fa(callable submit_code) è il callback della GUI
+        che raccoglie il codice 2FA dall'utente e lo passa a submit_2fa_code.
+
+        Se Apple richiede 2FA e on_2fa è None, solleva GsaError(needs_2fa=True).
+        """
+        for attempt in (1, 2):
+            session = self._login_once(apple_id, password)
+            if session is not None:
+                return session
+            # 2FA richiesta
+            if on_2fa is None:
+                raise GsaError(
+                    "Autenticazione a due fattori richiesta", needs_2fa=True
+                )
+            on_2fa(self)  # la GUI mostra il dialog e chiama client.submit_2fa_code(code)
+            logger.info("2FA validata: riprovo il login (tentativo %d)", attempt)
+        raise GsaError("Login non riuscito dopo la validazione 2FA")
+
+    def _login_once(self, apple_id: str, password: str) -> AppleSession | None:
+        """Un ciclo SRP init/complete. None = serve 2FA."""
+        srp.rfc5054_enable()
+        srp.no_username_in_x()
+
+        usr = srp.User(apple_id, b"", hash_alg=SHA256, ng_type=NG_2048)
+        _, A = usr.start_authentication()
+
+        resp = self._gsa_request({
+            "A2k": A,
+            "ps": ["s2k", "s2k_fo"],
+            "u": apple_id,
+            "o": "init",
+        })
+
+        if "sp" not in resp:
+            status = resp.get("Status", {})
+            raise GsaError(
+                f"Init SRP fallito: {status.get('em', resp)}",
+                apple_code=status.get("ec"),
+            )
+        protocol = resp["sp"]
+        if protocol not in ("s2k", "s2k_fo"):
+            raise GsaError(f"Protocollo password non supportato: {protocol}")
+
+        salt = resp["s"]
+        B = resp["B"]
+        c = resp["c"]
+        iterations = int(resp["i"])
+
+        usr.p = s2k_hash(password, salt, iterations, protocol)
+        M1 = usr.process_challenge(salt, B)
+        if M1 is None:
+            raise GsaError("Challenge SRP non valida (risposta server sospetta)")
+
+        resp = self._gsa_request({
+            "c": c,
+            "M1": M1,
+            "u": apple_id,
+            "o": "complete",
+        })
+
+        if "M2" not in resp:
+            status = resp.get("Status", {})
+            if "au" in status:
+                # 2FA richiesta: salva i token necessari per il flusso 2FA
+                self._pending_dsid = resp.get("dsid", "")
+                self._pending_idms_token = status.get("idmsToken", "")
+                logger.info("Apple richiede 2FA")
+                return None
+            raise GsaError(
+                f"Login fallito: {status.get('em', 'credenziali non valide')}",
+                apple_code=status.get("ec"),
+            )
+
+        usr.verify_session(resp["M2"])
+        if not usr.authenticated():
+            raise GsaError("Verifica server SRP fallita (M2 non valido)")
+
+        if "spd" not in resp:
+            raise GsaError("Login ok ma mancano i dati di servizio (spd)")
+
+        spd_plain = decrypt_spd(usr.get_session_key(), resp["spd"])
+        spd = plistlib.loads(spd_plain, fmt=plistlib.FMT_XML)
+
+        return self._build_session(spd)
+
+    # ------------------------------------------------- token Xcode (apptokens)
+    def fetch_xcode_token(self, spd: dict) -> str:
+        """Scambia la sessione GSA con uno Xcode token (X-Apple-GS-Token),
+        necessario per developerservices2.apple.com.
+
+        Formato wire Apple della risposta cifrata: b"XYZ" (AAD) | IV (16) |
+        ciphertext | tag GCM (16). Il checksum della richiesta è
+        HMAC-SHA256(sk, b"apptokens" + adsid + app).
+        """
+        import base64 as b64
+
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        app = "com.apple.gs.xcode.auth"
+        sk = spd["sk"]
+        if isinstance(sk, str):
+            sk = b64.b64decode(sk)
+        adsid = spd["adsid"]
+        checksum = hmac.new(sk, b"apptokens" + adsid.encode() + app.encode(), hashlib.sha256).digest()
+        params = {
+            "u": adsid,
+            "app": [app],
+            "c": spd["c"],
+            "t": spd["GsIdmsToken"],
+            "checksum": checksum,
+            "o": "apptokens",
+        }
+        resp = self._gsa_request(params)
+        et = resp.get("et")
+        if not et:
+            raise GsaError(f"Risposta apptokens senza 'et': {resp.get('Status')}")
+        if len(et) < 35 or et[:3] != b"XYZ":
+            raise GsaError("Blob token cifrato malformato")
+        iv = et[3:19]
+        plaintext = AESGCM(sk).decrypt(iv, et[19:], b"XYZ")
+        token_plist = plistlib.loads(plaintext)
+        token_info = token_plist.get("t", {}).get(app)
+        if not token_info or not token_info.get("token"):
+            raise GsaError("Xcode token non presente nella risposta apptokens")
+        return str(token_info["token"])
+
+    def _build_session(self, spd: dict) -> AppleSession:
+        cookies = {
+            k: v.value if hasattr(v, "value") else v
+            for k, v in self._session.cookies.items()
+        }
+        tokens = {}
+        t = spd.get("t") or {}
+        for key, val in t.items():
+            if isinstance(val, dict) and "token" in val:
+                tokens[key] = val["token"]
+        sk = spd.get("sk", b"")
+        if isinstance(sk, str):
+            sk = base64.b64decode(sk)
+        session = AppleSession(
+            cookies=cookies,
+            dsid=str(spd.get("dsid", "")),
+            adsid=str(spd.get("adsid", "")),
+            tokens=tokens,
+            account_info=spd,
+            sk=sk,
+        )
+        # mint dello Xcode token per i servizi developer
+        try:
+            session.xcode_token = self.fetch_xcode_token(spd)
+            logger.info("Xcode token ottenuto (scadenza: %s)", self._token_expiry(spd))
+        except GsaError as e:
+            logger.warning("Xcode token non ottenibile: %s", e)
+        if not session.logged_in:
+            logger.warning("Cookie myacinfo assente nella risposta: la sessione potrebbe non funzionare per i servizi Apple")
+        return session
+
+    @staticmethod
+    def _token_expiry(spd: dict) -> str:
+        t = (spd.get("t") or {}).get("com.apple.gs.appleid.auth") or {}
+        expiry = t.get("expiry")
+        return f"{expiry}" if expiry else "?"
+
+
+def default_anisette_getter():
+    """Anisette getter comodo: usa la sessione persistente locale."""
+    from .anisette_provider import get_anisette_headers
+
+    return get_anisette_headers()

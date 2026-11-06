@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+# strumenti binari scaricati
+kanga/tools/zsign/
+# dati locali di sessione/provisioning (mai in git!)
+*.kanga-session.json
+adi/
+test_output/

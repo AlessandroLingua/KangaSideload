@@ -1,6 +1,6 @@
 """Tab Jailbreak: rileva il dispositivo, mostra i tool compatibili per
-modello × iOS e installa gli IPA dalle release GitHub ufficiali usando la
-normale pipeline di firma/instalazione (login Apple + zsign + device).
+modello × iOS e installa gli IPA dalle fonti ufficiali (release GitHub o
+sito ufficiale del progetto) usando la normale pipeline firma+installazione.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -106,22 +107,41 @@ class JailbreakTab(QWidget):
             self.lbl_device.setText("Nessun dispositivo collegato via USB.")
             return
         d = devices[0]
-        model = model_lookup(d.product_type or "")
         self._device = d
-        if model:
-            self.lbl_device.setText(f"{d.name} — iOS {d.product_version or '?'} (udid {d.udid[:12]}…)")
+        model = model_lookup(d.product_type or "")
+        udid_txt = f" (udid {d.udid[:12]}…)"
+        if model is None:
+            self.lbl_device.setText(f"{d.name} — iOS {d.product_version or '?'}{udid_txt}")
             self.lbl_model.setText(
-                f"Modello: {model.name} | Chip: {model.chip} | Arch: {model.arch}"
-                + (" | checkm8: sì (palera1n possibile via DFU)" if model.checkm8 else "")
-                + ("" if d.trusted else " — DEVICE NON ABINATO: sbloccalo e premi Autorizza")
+                f"Modello {d.product_type} non presente nel catalogo: mostra solo l'elenco "
+                "generale dei tool. La firma e l'installazione funzionano comunque."
             )
-        else:
-            self.lbl_device.setText(f"{d.name} — iOS {d.product_version or '?'}")
-            self.lbl_model.setText(f"Modello non nel catalogo: {d.product_type}")
+            self._fill_tools(None, d.product_version or "")
+            return
+        self.lbl_device.setText(f"{d.name} — iOS {d.product_version or '?'}{udid_txt}")
+        self.lbl_model.setText(
+            f"Modello: {model.name} | Chip: {model.chip} | Arch: {model.arch}"
+            + (" | checkm8: sì" if model.checkm8 else "")
+            + ("" if d.trusted else " — DEVICE NON ABINATO: sbloccalo e premi Autorizza")
+        )
         self._fill_tools(model, d.product_version or "")
 
     def _fill_tools(self, model, ios_version: str):
-        if not model or not ios_version:
+        if not ios_version and model is None:
+            self.lbl_model.setText(
+                self.lbl_model.text() + " — modello e versione iOS non leggibili dal lockdownd"
+            )
+            return
+        if model is None:
+            # senza modello non sappiamo l'arch: mostra l'elenco generico senza azioni guidate
+            self._compat = []
+            self.table.setRowCount(0)
+            self.lbl_model.setText(
+                self.lbl_model.text()
+                + " — aggiungi il modello al catalogo (kanga/core/devices_catalog.py) per la matrice"
+            )
+            return
+        if not ios_version:
             self.lbl_model.setText(self.lbl_model.text() + " — versione iOS non leggibile")
             return
         self._compat = compatible_tools(model, ios_version)
@@ -134,10 +154,23 @@ class JailbreakTab(QWidget):
             status = "✅ COMPATIBILE" if c.compatible else "— non compatibile"
             self.table.setItem(row, 1, QTableWidgetItem(f"{status} ({c.reason})"))
             self.table.setItem(row, 2, QTableWidgetItem(c.tool.description))
+
             if c.compatible and c.method == "sideload":
-                btn = QPushButton("Scarica e installa")
-                btn.clicked.connect(lambda _=False, tid=c.tool.id: self._install_tool(tid))
-                self.table.setCellWidget(row, 3, btn)
+                if c.tool.repo or c.tool.direct_ipa_url:
+                    btn = QPushButton("Scarica e installa")
+                    btn.clicked.connect(lambda _=False, tid=c.tool.id: self._install_tool(tid))
+                    self.table.setCellWidget(row, 3, btn)
+                else:
+                    wrap = QWidget()
+                    h = QHBoxLayout(wrap)
+                    h.setContentsMargins(0, 0, 0, 0)
+                    b1 = QPushButton("Apri sito")
+                    b1.clicked.connect(lambda _=False, u=c.tool.official_site: self._open_site(u))
+                    b2 = QPushButton("Installa IPA…")
+                    b2.clicked.connect(lambda _=False, tid=c.tool.id: self._install_manual(tid))
+                    h.addWidget(b1)
+                    h.addWidget(b2)
+                    self.table.setCellWidget(row, 3, wrap)
             elif c.method == "dfu":
                 btn_info = QPushButton("Guida")
                 btn_info.clicked.connect(lambda _=False, tid=c.tool.id: self._show_dfu_guide(tid))
@@ -159,7 +192,7 @@ class JailbreakTab(QWidget):
             )
             return
         udid = self._device.udid
-        self._log(f"[JB] Scarico {tool.name} dal repo ufficiale {tool.repo}...")
+        self._log(f"[JB] Scarico {tool.name} dalla fonte ufficiale...")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
 
@@ -168,15 +201,15 @@ class JailbreakTab(QWidget):
             self.progress.setValue(pct)
 
         def run():
-            ipa = downloads.download_ipa(tool.repo, progress_cb=on_dl)
-            self._log(f"[JB] Download completato: {ipa.name}")
+            ipa = downloads.fetch_tool_ipa(tool, progress_cb=on_dl)
+            self._log(f"[JB] Download completato: {Path(ipa).name}")
             self._log(f"[JB] Firma e installazione su {udid}...")
             return self._main.flow.sideload(session, Path(ipa), udid)
 
         def ok(signed_ipa):
             self.progress.setVisible(False)
             self._log(f"[JB] ✅ {tool.name} installato! Aprilo dal home screen.")
-            if tool.id in ("dopamine",):
+            if tool.id in ("dopamine", "phoenix", "h3lix", "taurine", "unc0ver"):
                 self._log("[JB] Nota: al riavvio ri-apri l'app per ri-applicare il jailbreak.")
 
         def fail(msg):
@@ -185,6 +218,49 @@ class JailbreakTab(QWidget):
             QMessageBox.critical(self, "Errore jailbreak", msg)
 
         self._download_worker = start_worker(run, on_ok=ok, on_fail=fail)
+
+    def _install_manual(self, tool_id: str):
+        """Per i tool la cui fonte originale è offline: l'utente fornisce l'IPA."""
+        tool = find_tool(tool_id)
+        if not tool or not self._device:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Seleziona l'IPA di {tool.name}", "", "App iOS (*.ipa)"
+        )
+        if not path:
+            return
+        session = self._main.flow.restore_session()
+        if not session or not session.xcode_token:
+            QMessageBox.warning(
+                self,
+                "Login richiesto",
+                "Per firmare e installare serve prima l'accesso con Apple ID (tab Sideload → Accedi).",
+            )
+            return
+        udid = self._device.udid
+        self._log(f"[JB] Installazione manuale di {tool.name} da {path}...")
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+
+        def run():
+            return self._main.flow.sideload(session, Path(path), udid)
+
+        def ok(signed_ipa):
+            self.progress.setVisible(False)
+            self._log(f"[JB] ✅ {tool.name} installato!")
+
+        def fail(msg):
+            self.progress.setVisible(False)
+            self._log(f"[JB] ⚠ Errore: {msg}")
+            QMessageBox.critical(self, "Errore jailbreak", msg)
+
+        self._download_worker = start_worker(run, on_ok=ok, on_fail=fail)
+
+    def _open_site(self, url: str):
+        import webbrowser
+
+        webbrowser.open(url)
+        self._log(f"[JB] Aperto nel browser: {url}")
 
     def _show_dfu_guide(self, tool_id: str):
         QMessageBox.information(

@@ -1,6 +1,9 @@
-"""Download di IPA dalle release GitHub UFFICIALI dei progetti jailbreak.
+"""Download di IPA dalle fonti UFFICIALI dei progetti jailbreak.
 
-Usa solo l'API GitHub pubblica degli owner repository citati nel catalogo.
+Due canali supportati:
+  - release GitHub ufficiali (repo 'owner/repo')
+  - URL diretto dal sito ufficiale del progetto (es. phoenixpwn.com)
+
 Nessun mirror di terzi, nessun binario modificato.
 """
 from __future__ import annotations
@@ -9,6 +12,8 @@ import logging
 from pathlib import Path
 
 import requests
+
+from .jailbreak_catalog import JailbreakTool
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +47,27 @@ def latest_ipa_asset(repo: str) -> dict:
     }
 
 
-def download_ipa(repo: str, dest_dir: Path | None = None, progress_cb=None) -> Path:
-    """Scarica l'IPA dell'ultima release ufficiale e ritorna il percorso locale."""
-    info = latest_ipa_asset(repo)
-    dest_dir = dest_dir or DOWNLOAD_DIR
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{repo.split('/')[0]}-{repo.split('/')[1]}-{info['tag']}-{info['name']}"
+def download_url(url: str, dest: Path, progress_cb=None) -> Path:
+    """Scarica un file con progresso e ritorna il percorso locale.
 
-    if dest.exists() and dest.stat().st_size == info["size"] and info["size"] > 0:
-        logger.info("IPA già presente: %s", dest)
-        return dest
+    Per i download diretti dai siti ufficiali aggiunge il referer della stessa
+    origine: alcuni siti (es. phoenixpwn.com) bloccano l'hotlinking.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Scarico %s -> %s", url, dest)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    from urllib.parse import urlparse
 
-    logger.info("Scarico %s (%s) da %s", info["name"], info["tag"], info["url"])
-    with requests.get(info["url"], stream=True, timeout=120) as r:
+    origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+    headers["Referer"] = origin
+    with requests.get(url, stream=True, timeout=120, headers=headers, allow_redirects=True) as r:
         r.raise_for_status()
-        total = int(r.headers.get("Content-Length", info["size"]) or 0)
+        if "html" in (r.headers.get("Content-Type") or "").lower():
+            raise DownloadError(
+                f"Il server ha risposto con una pagina HTML invece del file "
+                f"(l'URL diretto è cambiato?): {r.url}"
+            )
+        total = int(r.headers.get("Content-Length", 0) or 0)
         done = 0
         tmp = dest.with_suffix(dest.suffix + ".part")
         with open(tmp, "wb") as f:
@@ -65,8 +76,31 @@ def download_ipa(repo: str, dest_dir: Path | None = None, progress_cb=None) -> P
                     f.write(chunk)
                     done += len(chunk)
                     if progress_cb and total:
-                        progress_cb(int(done * 100 / total), info["name"])
+                        progress_cb(int(done * 100 / total), dest.name)
         tmp.rename(dest)
     if progress_cb:
-        progress_cb(100, info["name"])
+        progress_cb(100, dest.name)
     return dest
+
+
+def fetch_tool_ipa(tool: JailbreakTool, dest_dir: Path | None = None, progress_cb=None) -> Path:
+    """Scarica l'IPA ufficiale del tool: da GitHub release o URL diretto del sito."""
+    dest_dir = dest_dir or DOWNLOAD_DIR
+    if tool.repo:
+        info = latest_ipa_asset(tool.repo)
+        dest = dest_dir / f"{tool.repo.split('/')[0]}-{tool.repo.split('/')[1]}-{info['tag']}-{info['name']}"
+        if dest.exists() and dest.stat().st_size == info["size"] and info["size"] > 0:
+            logger.info("IPA già presente: %s", dest)
+            return dest
+        return download_url(info["url"], dest, progress_cb)
+    if tool.direct_ipa_url:
+        name = tool.direct_ipa_url.rsplit("/", 1)[-1].split("?")[0] or f"{tool.id}.ipa"
+        dest = dest_dir / f"{tool.id}-{name}"
+        if dest.exists() and dest.stat().st_size > 0:
+            logger.info("IPA già presente: %s", dest)
+            return dest
+        return download_url(tool.direct_ipa_url, dest, progress_cb)
+    raise DownloadError(
+        f"{tool.name}: nessuna fonte di download automatico — usa il sito ufficiale "
+        f"{tool.official_site} e poi 'Installa IPA…'"
+    )

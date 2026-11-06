@@ -1,8 +1,9 @@
 """Catalogo modelli Apple: ProductType (es. 'iPhone9,3') -> nome commerciale,
 chip e architettura CPU. Serve alla matrice di compatibilità jailbreak.
 
-Arch: 'arm64' (A8-A11), 'arm64e' (A12+), 'x86_64' non presente su iOS device.
-I chip A7-A11 sono checkm8 (jailbreak DFU come palera1n).
+Arch: 'armv7' (A4-A6, 32-bit), 'arm64' (A7-A11), 'arm64e' (A12+).
+checkm8: vulnerabilità BootROM dei chip A5-A11 (jailbreak DFU tipo palera1n;
+per i 32-bit vecchi non ci sono jailbreak DFU moderni, restano gli app-jailbreak).
 """
 from __future__ import annotations
 
@@ -19,11 +20,14 @@ class DeviceModel:
 
 
 def _m(product_type: str, name: str, chip: str, arch: str) -> DeviceModel:
-    return DeviceModel(product_type, name, chip, arch, arch == "arm64")
+    return DeviceModel(product_type, name, chip, arch, arch in ("arm64", "armv7") and chip != "A4")
 
 
 # ------------------------------- iPhone -------------------------------
 _IPHONE = [
+    ("iPhone4,1", "iPhone 4s", "A5"),
+    ("iPhone5,1", "iPhone 5", "A6"), ("iPhone5,2", "iPhone 5", "A6"),
+    ("iPhone5,3", "iPhone 5c", "A6"), ("iPhone5,4", "iPhone 5c", "A6"),
     ("iPhone6,1", "iPhone 5s", "A7"), ("iPhone6,2", "iPhone 5s", "A7"),
     ("iPhone7,1", "iPhone 6 Plus", "A8"), ("iPhone7,2", "iPhone 6", "A8"),
     ("iPhone8,1", "iPhone 6s", "A9"), ("iPhone8,2", "iPhone 6s Plus", "A9"),
@@ -54,12 +58,21 @@ _IPHONE = [
 
 # ------------------------------- iPod -------------------------------
 _IPOD = [
+    ("iPod5,1", "iPod touch (5ª gen)", "A5"),
     ("iPod7,1", "iPod touch (6ª gen)", "A8"),
     ("iPod9,1", "iPod touch (7ª gen)", "A10"),
 ]
 
 # ------------------------------- iPad -------------------------------
 _IPAD = [
+    ("iPad2,1", "iPad 2", "A5"), ("iPad2,2", "iPad 2", "A5"),
+    ("iPad2,3", "iPad 2", "A5"), ("iPad2,4", "iPad 2", "A5"),
+    ("iPad2,5", "iPad mini (1ª gen)", "A5"), ("iPad2,6", "iPad mini (1ª gen)", "A5"),
+    ("iPad2,7", "iPad mini (1ª gen)", "A5"),
+    ("iPad3,1", "iPad (3ª gen)", "A5X"), ("iPad3,2", "iPad (3ª gen)", "A5X"),
+    ("iPad3,3", "iPad (3ª gen)", "A5X"),
+    ("iPad3,4", "iPad (4ª gen)", "A6X"), ("iPad3,5", "iPad (4ª gen)", "A6X"),
+    ("iPad3,6", "iPad (4ª gen)", "A6X"),
     ("iPad4,1", "iPad Air", "A7"), ("iPad4,2", "iPad Air", "A7"),
     ("iPad4,4", "iPad mini 2", "A7"), ("iPad4,5", "iPad mini 2", "A7"),
     ("iPad4,7", "iPad mini 3", "A7"), ("iPad4,8", "iPad mini 3", "A7"),
@@ -96,6 +109,8 @@ _CATALOG: dict[str, DeviceModel] = {}
 
 def _build():
     def arch_for(chip: str) -> str:
+        if chip in ("A4", "A5", "A5X", "A6", "A6X"):
+            return "armv7"
         if chip in ("A7", "A8", "A8X", "A9", "A9X", "A10", "A10X", "A10Z", "A11"):
             return "arm64"
         if chip in ("A12", "A12X", "A12Z", "A13", "A14", "A15", "A16", "A17", "A17 Pro",

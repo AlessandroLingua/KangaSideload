@@ -56,6 +56,10 @@ class GenericWorker(QThread):
             self.failed.emit(str(e) or e.__class__.__name__)
 
 
+class LoginCancelled(Exception):
+    """L'utente ha chiuso il dialog 2FA senza inserire il codice."""
+
+
 class LoginFlow(QObject):
     """Login Apple con supporto 2FA: emette 'need_2fa' quando serve il codice."""
 
@@ -73,9 +77,16 @@ class LoginFlow(QObject):
         self._password = password
         self._code = None
         self._code_available = None
+        self._cancelled = False
 
     def provide_code(self, code: str):
         self._code = code
+        if self._code_available:
+            self._code_available()
+
+    def cancel(self):
+        """Interrompe subito l'attesa del codice 2FA (invece dei 3 minuti di timeout)."""
+        self._cancelled = True
         if self._code_available:
             self._code_available()
 
@@ -91,10 +102,12 @@ class LoginFlow(QObject):
                 evt = threading.Event()
                 self._code_available = evt.set
                 waited = 0.0
-                while self._code is None and waited < self.TWOFA_TIMEOUT_S:
+                while self._code is None and not self._cancelled and waited < self.TWOFA_TIMEOUT_S:
                     if evt.wait(timeout=0.2):
                         break
                     waited += 0.2
+                if self._cancelled:
+                    raise LoginCancelled("Login annullato")
                 if self._code is None:
                     raise TimeoutError(
                         "Nessun codice 2FA inserito entro 3 minuti: riprova il login"

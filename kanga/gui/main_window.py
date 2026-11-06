@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -75,6 +75,12 @@ class MainWindow(QMainWindow):
         self._worker: GenericWorker | None = None
         self._login_flow: LoginFlow | None = None
         self._login_dlg = None
+        # ultimo tentativo di login, solo in memoria: serve a ripresentare
+        # Apple ID e password se il login fallisce e va ripetuto
+        self._last_login: tuple[str, str] | None = None
+        self._remember_choice = True
+        self._last_login_error = ""
+        self._login_cancelled = False
         self._devices: list = []
         self._pending_install = False
 
@@ -257,13 +263,13 @@ class MainWindow(QMainWindow):
         if auto and not saved:
             self._log("[LOGIN] Nessuna credenziale salvata: serve il login manuale")
             return
-        prefill = saved if saved else None
+        # il tentativo più recente di questa sessione ha la precedenza su quanto
+        # salvato su disco (es. password appena corretta)
+        prefill = self._last_login or saved
 
-        dlg = LoginDialog(self, prefill=prefill)
-        if auto and saved:
-            # login automatico con credenziali salvate: nessuna interazione
-            # se Apple non richiede il 2FA (che mostra comunque il dialog)
-            pass
+        dlg = LoginDialog(self, prefill=prefill, remember_checked=self._remember_choice)
+        if self._last_login_error and not auto:
+            dlg.status(f"Tentativo precedente non riuscito: {self._last_login_error}")
         login_flow = LoginFlow(self.flow, "", "")
         login_flow.log.connect(dlg.status)
         login_flow.log.connect(self._on_login_log)
@@ -273,22 +279,45 @@ class MainWindow(QMainWindow):
 
         self._login_dlg = dlg
         self._login_flow = login_flow
+        self._login_cancelled = False
 
         if auto:
             if not dlg.apple_id or not dlg.password:
                 self._log("[LOGIN] Credenziali salvate incomplete: apro il dialog manuale")
                 return
+            login_flow._apple_id = dlg.apple_id
+            login_flow._password = dlg.password
             self._log(f"[LOGIN] Login automatico con credenziali salvate ({dlg.apple_id})")
             self._start_login_thread(dlg, login_flow)
             return
 
         if not dlg.exec():
             return
+        self._remember_credentials(dlg)
         login_flow._apple_id = dlg.apple_id
         login_flow._password = dlg.password
         dlg.status("Login in corso…")
         self._log(f"[LOGIN] Avvio login per {dlg.apple_id}")
         self._start_login_thread(dlg, login_flow)
+
+    def _remember_credentials(self, dlg) -> None:
+        """Memorizza le credenziali appena inserite, PRIMA del login.
+
+        Prima venivano salvate solo a login riuscito: se Apple rispondeva con un
+        errore (es. 503) non restava nulla e ogni nuovo tentativo ripartiva da
+        campi vuoti. Ora restano in memoria per tutta la sessione e, con
+        «Ricorda» attivo, vengono salvate subito su disco (DPAPI).
+        """
+        self._last_login = (dlg.apple_id, dlg.password)
+        self._remember_choice = dlg.remember
+        if dlg.remember:
+            try:
+                store.save_credentials(dlg.apple_id, dlg.password)
+                self._log("Credenziali salvate su questo computer (cifrate DPAPI).")
+            except Exception as e:
+                self._log(f"⚠ Salvataggio credenziali fallito: {e}")
+        else:
+            store.clear_credentials()
 
     def _start_login_thread(self, dlg, login_flow):
         from PySide6.QtCore import QThread
@@ -296,6 +325,11 @@ class MainWindow(QMainWindow):
         t = QThread(self)
         login_flow.moveToThread(t)
         t.started.connect(login_flow.run)
+        # chiude il thread a login finito: altrimenti ogni tentativo lascia un
+        # thread vivo e Qt va in crash alla chiusura dell'app
+        login_flow.finished_ok.connect(t.quit)
+        login_flow.failed.connect(t.quit)
+        t.finished.connect(login_flow.deleteLater)
         t.start()
         self._login_thread = t
 
@@ -309,6 +343,10 @@ class MainWindow(QMainWindow):
         code = dlg.code()
         if code:
             self._login_flow.provide_code(code)
+        else:
+            # dialog chiuso senza codice: annulla subito invece di attendere 3 minuti
+            self._login_cancelled = True
+            self._login_flow.cancel()
 
     def _on_login_ok(self, session):
         dlg = self._login_dlg
@@ -321,6 +359,7 @@ class MainWindow(QMainWindow):
                 self._log(f"⚠ Salvataggio credenziali fallito: {e}")
         elif not dlg.remember:
             store.clear_credentials()
+        self._last_login_error = ""
         dlg.accept()
         self.btn_login.setText("Esci / cambia account")
         self.btn_install.setEnabled(True)
@@ -335,10 +374,25 @@ class MainWindow(QMainWindow):
 
     def _on_login_fail(self, msg):
         dlg = self._login_dlg
-        dlg.status(f"Errore: {msg}")
         dlg.reset_for_retry()
-        self._log(f"[LOGIN] ✗ Fallito: {msg}")
         self._pending_install = False
+        if self._login_cancelled:
+            self._log("[LOGIN] Annullato")
+            return
+        dlg.status(f"Errore: {msg}")
+        self._log(f"[LOGIN] ✗ Fallito: {msg}")
+        self._last_login_error = msg
+        if dlg.apple_id and dlg.password and self._last_login is None:
+            # login automatico con credenziali salvate: tienile per il nuovo tentativo
+            self._last_login = (dlg.apple_id, dlg.password)
+        # riapre subito il dialog con Apple ID e password già inseriti e l'errore
+        # in evidenza: per riprovare basta premere «Accedi» (o correggere la password)
+        QTimer.singleShot(0, self._reopen_login_after_failure)
+
+    def _reopen_login_after_failure(self):
+        if self.flow.restore_session():
+            return  # nel frattempo una sessione è comparsa: non serve riprovare
+        self._open_login()
 
     # ------------------------------------------------------------- install
     def _start_install(self):

@@ -95,10 +95,16 @@ Conseguenze pratiche:
 
 ## Privacy
 
-- La **password** dell'Apple ID non viene mai salvata su disco
+- La password dell'Apple ID può essere salvata **opzionalmente** (checkbox nel
+  dialog di login): viene cifrata con **Windows DPAPI** e solo il tuo utente
+  Windows su questa macchina può decifrarla. Mai in chiaro su disco. Per
+  dimenticarla: deseleziona la checkbox e rifai il login, oppure cancella
+  `%LOCALAPPDATA%/Kanga/credentials.kanga.json`
 - Il token di sessione resta in `%LOCALAPPDATA%/Kanga/` (cartella del tuo
   profilo utente); cancellala per fare logout completo
 - Nessun dato inviato a server terzi (l'anisette è locale)
+- Con credenziali salvate: all'apertura dell'app (o quando riprovi un sideload
+  con sessione scaduta) il login è automatico — ti chiede solo il codice 2FA
 
 ## Struttura del codice
 

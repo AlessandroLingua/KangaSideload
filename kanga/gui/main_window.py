@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
     # thread e Qt li recapita nel thread GUI
     _log_sig = Signal(str)
     _flow_sig = Signal(str, str)
+    session_ready = Signal()  # emesso dopo un login riuscito
 
     def __init__(self):
         super().__init__()
@@ -73,7 +74,9 @@ class MainWindow(QMainWindow):
         self.flow = AppFlow(on_event=self._on_flow_event)
         self._worker: GenericWorker | None = None
         self._login_flow: LoginFlow | None = None
+        self._login_dlg = None
         self._devices: list = []
+        self._pending_install = False
 
         tabs = QTabWidget()
         tabs.addTab(self._build_sideload_tab(), "Sideload")
@@ -241,7 +244,7 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------- login
-    def _open_login(self):
+    def _open_login(self, auto: bool = False):
         session = self.flow.restore_session()
         if session:
             self.flow.logout()
@@ -250,9 +253,18 @@ class MainWindow(QMainWindow):
             self._log("Logout effettuato.")
             return
 
-        dlg = LoginDialog(self)
+        saved = store.load_credentials()
+        if auto and not saved:
+            self._log("[LOGIN] Nessuna credenziale salvata: serve il login manuale")
+            return
+        prefill = saved if saved else None
+
+        dlg = LoginDialog(self, prefill=prefill)
+        if auto and saved:
+            # login automatico con credenziali salvate: nessuna interazione
+            # se Apple non richiede il 2FA (che mostra comunque il dialog)
+            pass
         login_flow = LoginFlow(self.flow, "", "")
-        # connessioni a metodi bound di MainWindow: Qt le esegue nel thread GUI
         login_flow.log.connect(dlg.status)
         login_flow.log.connect(self._on_login_log)
         login_flow.need_2fa.connect(self._on_need_2fa)
@@ -261,12 +273,24 @@ class MainWindow(QMainWindow):
 
         self._login_dlg = dlg
         self._login_flow = login_flow
+
+        if auto:
+            if not dlg.apple_id or not dlg.password:
+                self._log("[LOGIN] Credenziali salvate incomplete: apro il dialog manuale")
+                return
+            self._log(f"[LOGIN] Login automatico con credenziali salvate ({dlg.apple_id})")
+            self._start_login_thread(dlg, login_flow)
+            return
+
         if not dlg.exec():
             return
         login_flow._apple_id = dlg.apple_id
         login_flow._password = dlg.password
         dlg.status("Login in corso…")
         self._log(f"[LOGIN] Avvio login per {dlg.apple_id}")
+        self._start_login_thread(dlg, login_flow)
+
+    def _start_login_thread(self, dlg, login_flow):
         from PySide6.QtCore import QThread
 
         t = QThread(self)
@@ -287,16 +311,34 @@ class MainWindow(QMainWindow):
             self._login_flow.provide_code(code)
 
     def _on_login_ok(self, session):
-        self._login_dlg.accept()
+        dlg = self._login_dlg
+        # salva o cancella le credenziali secondo la checkbox
+        if dlg.remember and dlg.apple_id and dlg.password:
+            try:
+                store.save_credentials(dlg.apple_id, dlg.password)
+                self._log("Credenziali salvate su questo computer (cifrate DPAPI).")
+            except Exception as e:
+                self._log(f"⚠ Salvataggio credenziali fallito: {e}")
+        elif not dlg.remember:
+            store.clear_credentials()
+        dlg.accept()
         self.btn_login.setText("Esci / cambia account")
         self.btn_install.setEnabled(True)
         self._log("Sessione pronta: firma e installazione abilitate.")
+        self.session_ready.emit()
+
+        # se il login era partito per riprendere un sideload, riprendilo ora
+        if self._pending_install:
+            self._pending_install = False
+            self._log("[INSTALL] Sessione pronta: riprendo il sideload…")
+            self._start_install()
 
     def _on_login_fail(self, msg):
         dlg = self._login_dlg
         dlg.status(f"Errore: {msg}")
         dlg.reset_for_retry()
         self._log(f"[LOGIN] ✗ Fallito: {msg}")
+        self._pending_install = False
 
     # ------------------------------------------------------------- install
     def _start_install(self):
@@ -304,7 +346,15 @@ class MainWindow(QMainWindow):
             return
         session = self.flow.restore_session()
         if not session or not session.xcode_token:
-            QMessageBox.warning(self, "Sessione assente", "Accedi prima con il tuo Apple ID.")
+            # nessuna sessione: se ci sono credenziali salvate fa il login
+            # automatico e riprende l'installazione al termine
+            if store.load_credentials():
+                self._log("[INSTALL] Sessione scaduta: login automatico con credenziali salvate…")
+                self._pending_install = True
+                self.btn_install.setEnabled(False)
+                self._open_login(auto=True)
+            else:
+                QMessageBox.warning(self, "Sessione assente", "Accedi prima con il tuo Apple ID.")
             return
         udid = self.cmb_devices.currentData()
         if not udid:

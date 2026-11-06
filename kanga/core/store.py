@@ -76,3 +76,89 @@ def session_to_apple(data: dict):
         xcode_token=data.get("xcode_token", ""),
         sk=base64.b64decode(data["sk"]) if data.get("sk") else b"",
     )
+
+
+# ---------------------------------------------------------------- credenziali
+# Salvate cifrate con Windows DPAPI (scope utente): solo il tuo account Windows
+# su questa macchina può decifrare. Mai in chiaro su disco.
+
+_CRED_PATH = None
+
+
+def credentials_path() -> Path:
+    return base_dir() / "credentials.kanga.json"
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    import ctypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_uint), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    ok = ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(blob_in), "KangaSideload", None, None, None, 0, ctypes.byref(blob_out)
+    )
+    if not ok:
+        raise OSError("CryptProtectData fallita")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    import ctypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_uint), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    ok = ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+    )
+    if not ok:
+        raise OSError("CryptUnprotectData fallita")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def save_credentials(apple_id: str, password: str) -> None:
+    base_dir().mkdir(parents=True, exist_ok=True)
+    blob = _dpapi_protect(password.encode("utf-8"))
+    credentials_path().write_text(
+        json.dumps(
+            {
+                "apple_id": apple_id,
+                "password_protected": base64.b64encode(blob).decode(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    logger.info("Credenziali salvate (cifrate DPAPI) per %s", apple_id)
+
+
+def load_credentials() -> tuple[str, str] | None:
+    """Ritorna (apple_id, password) o None. Richiede lo stesso utente Windows."""
+    p = credentials_path()
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        blob = base64.b64decode(data["password_protected"])
+        password = _dpapi_unprotect(blob).decode("utf-8")
+        return data["apple_id"], password
+    except Exception as e:
+        logger.warning("Credenziali non decifrabili (%s): le ignoro", e)
+        return None
+
+
+def clear_credentials() -> None:
+    credentials_path().unlink(missing_ok=True)

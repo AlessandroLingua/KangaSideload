@@ -54,7 +54,7 @@ class AppFlow:
         self.anisette = AnisetteProvider()
 
     def log(self, msg: str):
-        logger.info(msg)
+        # NOTA: niente logger.info qui — il bridge GUI ripeterebbe il messaggio
         self.on_event("log", msg)
 
     # ---------------------------------------------------------------- login

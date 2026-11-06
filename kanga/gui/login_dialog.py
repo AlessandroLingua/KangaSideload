@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QFormLayout,
     QFrame,
@@ -15,9 +16,12 @@ from PySide6.QtWidgets import (
 
 
 class LoginDialog(QDialog):
-    """Raccoglie Apple ID + password; al segnale 2FA mostra il campo codice."""
+    """Raccoglie Apple ID + password; al segnale 2FA mostra il campo codice.
 
-    def __init__(self, parent=None):
+    Con remember=True precompila i campi dalle credenziali salvate (DPAPI).
+    """
+
+    def __init__(self, parent=None, prefill: tuple[str, str] | None = None, remember_checked: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Accedi con Apple ID")
         self.setMinimumWidth(420)
@@ -25,9 +29,9 @@ class LoginDialog(QDialog):
 
         layout = QVBoxLayout(self)
         info = QLabel(
-            "Le credenziali vengono usate solo per la richiesta di firma ad Apple "
-            "(protocollo GrandSlam) e non vengono salvate. Il codice 2FA arriva "
-            "sui tuoi dispositivi Apple fidati."
+            "Le credenziali vengono usate solo per l'autenticazione ad Apple "
+            "(protocollo GrandSlam). Il codice 2FA arriva sui tuoi dispositivi "
+            "Apple fidati."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -40,6 +44,17 @@ class LoginDialog(QDialog):
         form.addRow("Apple ID:", self.txt_apple_id)
         form.addRow("Password:", self.txt_password)
         layout.addLayout(form)
+
+        if prefill:
+            self.txt_apple_id.setText(prefill[0])
+            self.txt_password.setText(prefill[1])
+
+        self.chk_remember = QCheckBox(
+            "Ricorda Apple ID e password su questo computer "
+            "(cifrati con Windows DPAPI: solo il tuo utente può leggerli)"
+        )
+        self.chk_remember.setChecked(remember_checked)
+        layout.addWidget(self.chk_remember)
 
         self.frame_2fa = QFrame()
         form2 = QFormLayout(self.frame_2fa)
@@ -82,6 +97,10 @@ class LoginDialog(QDialog):
     @property
     def password(self) -> str:
         return self.txt_password.text()
+
+    @property
+    def remember(self) -> bool:
+        return self.chk_remember.isChecked()
 
     def show_2fa(self):
         self.frame_2fa.setVisible(True)

@@ -44,6 +44,9 @@ class JailbreakTab(QWidget):
         self._device = None  # DeviceInfo corrente
         self._compat: list[Compatibility] = []
         self._download_worker = None
+        self._pending_tool_id: str | None = None
+        # dopo un login riuscito riprende l'eventuale installazione in attesa
+        main_window.session_ready.connect(self._on_session_ready)
 
         layout = QVBoxLayout(self)
 
@@ -188,12 +191,35 @@ class JailbreakTab(QWidget):
             return
         session = self._main.flow.restore_session()
         if not session or not session.xcode_token:
+            # se ci sono credenziali salvate: login automatico e ripresa
+            from ..core import store
+
+            if store.load_credentials():
+                self._pending = ("download", tool_id, None)
+                self._log(f"[JB] Login automatico con credenziali salvate, poi installo {tool.name}…")
+                self._main._open_login(auto=True)
+                return
             QMessageBox.warning(
                 self,
                 "Login richiesto",
                 "Per firmare e installare serve prima l'accesso con Apple ID (tab Sideload → Accedi).",
             )
             return
+        self._run_tool_install(tool, session)
+
+    def _on_session_ready(self):
+        pending = getattr(self, "_pending", None)
+        if not pending:
+            return
+        self._pending = None
+        kind, tool_id, ipa = pending
+        self._log("[JB] Sessione pronta: riprendo l'installazione…")
+        if kind == "manual" and ipa:
+            self._run_manual_install(tool_id, ipa)
+        else:
+            self._install_tool(tool_id)
+
+    def _run_tool_install(self, tool, session):
         udid = self._device.udid
         self._log(f"[JB] Scarico {tool.name} dalla fonte ufficiale...")
         self.progress.setVisible(True)
@@ -234,12 +260,26 @@ class JailbreakTab(QWidget):
             return
         session = self._main.flow.restore_session()
         if not session or not session.xcode_token:
+            from ..core import store
+
+            if store.load_credentials():
+                self._pending = ("manual", tool_id, path)
+                self._log("[JB] Login automatico con credenziali salvate, poi installo l'IPA…")
+                self._main._open_login(auto=True)
+                return
             QMessageBox.warning(
                 self,
                 "Login richiesto",
                 "Per firmare e installare serve prima l'accesso con Apple ID (tab Sideload → Accedi).",
             )
             return
+        self._run_manual_install(tool_id, path)
+
+    def _run_manual_install(self, tool_id: str, path: str):
+        tool = find_tool(tool_id)
+        if not tool or not self._device:
+            return
+        session = self._main.flow.restore_session()
         udid = self._device.udid
         self._log(f"[JB] Installazione manuale di {tool.name} da {path}...")
         self.progress.setVisible(True)

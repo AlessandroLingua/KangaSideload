@@ -4,11 +4,15 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.pytest_cache/
 # strumenti binari scaricati
 kanga/tools/zsign/
 # dati locali di sessione/provisioning (mai in git!)
 *.kanga-session.json
+credentials.kanga.json
 adi/
 test_output/
+# IPA scaricati dal tab Jailbreak (vecchia posizione; ora in %LOCALAPPDATA%/Kanga/downloads)
 downloads/
+# repo RE Sideloadly dell'utente, mantenuta separata
 DOCU/

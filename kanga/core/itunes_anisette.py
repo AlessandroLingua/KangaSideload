@@ -23,6 +23,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .store import base_dir
+
 logger = logging.getLogger(__name__)
 
 # cartelle dove cercare il set DLL Apple (AOSKit + objc + Foundation)
@@ -38,13 +40,20 @@ CANDIDATE_DIRS = [
 CLIENT_INFO = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKitWin/1 (com.apple.iTunes/12.13.7)>"
 
 
+OTP_MISSING_MSG = (
+    "AOSKit non ha prodotto l'OTP (possibile errore -45075 'Info request failed'): "
+    "il set di DLL Apple trovato è incompleto o incoerente. Serve il set ufficiale "
+    "('Apple Application Support' + 'Internet Services' con AOSKit) installato da "
+    "iTunes o iCloud per Windows."
+)
+
 class ItunesAnisetteError(RuntimeError):
     pass
 
 
 def _device_id() -> str:
     """UUID persistente del 'device' (X-Mme-Device-Id / X-Apple-I-MD-LU)."""
-    base = Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "Kanga"
+    base = base_dir()
     base.mkdir(parents=True, exist_ok=True)
     f = base / "device-id.txt"
     if f.exists():
@@ -96,7 +105,7 @@ class ItunesAnisette:
         self._loaded = False
         arch = _dll_arch(Path(self.lib_dir) / "AOSKit.dll")
         self._use_helper = arch != _python_arch()
-        self._helper_py32 = Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "Kanga" / "py32" / "python.exe"
+        self._helper_py32 = base_dir() / "py32" / "python.exe"
         logger.info(
             "Anisette iTunes: cartella DLL %s (dll %s, python %s, helper=%s)",
             self.lib_dir, arch, _python_arch(), self._use_helper,
@@ -168,14 +177,19 @@ class ItunesAnisette:
                 "dopo aver preparato l'helper." % self._helper_py32
             )
         cmd = [str(self._helper_py32), str(helper), self.lib_dir]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # niente finestra console quando l'app gira come GUI (pythonw)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, creationflags=flags)
         out = proc.stdout.strip()
         try:
             data = json.loads(out.splitlines()[-1])
         except Exception:
             raise ItunesAnisetteError(f"Risposta inattesa dall'helper 32-bit: {out[:200]}")
         if "__error__" in data:
-            raise ItunesAnisetteError(f"Helper 32-bit: {data['__error__']}")
+            err = str(data["__error__"])
+            if "OTP/MID mancanti" in err:
+                raise ItunesAnisetteError(f"{OTP_MISSING_MSG} (cartella DLL: {self.lib_dir})")
+            raise ItunesAnisetteError(f"Helper 32-bit: {err}")
         return data
 
     # ------------------------------------------------------------ public
@@ -206,12 +220,7 @@ class ItunesAnisette:
         otp = dict_get("X-Apple-MD")
         mid = dict_get("X-Apple-MD-M")
         if not otp or not mid:
-            raise ItunesAnisetteError(
-                "AOSKit non ha prodotto l'OTP (possibile errore -45075 'Info request "
-                "failed'): il set DLL usato è incompleto o incoerente. Serve il set "
-                "ufficiale Apple ('Apple Application Support' + 'Internet Services' "
-                "con AOSKit) che viene da iCloud per Windows / iTunes completo."
-            )
+            raise ItunesAnisetteError(OTP_MISSING_MSG)
 
         did = _device_id()
         now = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")

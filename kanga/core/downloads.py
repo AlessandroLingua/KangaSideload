@@ -9,16 +9,23 @@ Nessun mirror di terzi, nessun binario modificato.
 from __future__ import annotations
 
 import logging
+import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
+from . import store
 from .jailbreak_catalog import JailbreakTool
 
 logger = logging.getLogger(__name__)
 
 API = "https://api.github.com/repos/{repo}/releases/latest"
-DOWNLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "downloads"
+
+
+def download_dir() -> Path:
+    """Cache degli IPA scaricati: %LOCALAPPDATA%/Kanga/downloads (fuori dal progetto)."""
+    return store.downloads_dir()
 
 
 class DownloadError(RuntimeError):
@@ -55,48 +62,57 @@ def download_url(url: str, dest: Path, progress_cb=None) -> Path:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Scarico %s -> %s", url, dest)
-    headers = {"User-Agent": "Mozilla/5.0"}
-    from urllib.parse import urlparse
-
-    origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
-    headers["Referer"] = origin
-    with requests.get(url, stream=True, timeout=120, headers=headers, allow_redirects=True) as r:
-        r.raise_for_status()
-        if "html" in (r.headers.get("Content-Type") or "").lower():
-            raise DownloadError(
-                f"Il server ha risposto con una pagina HTML invece del file "
-                f"(l'URL diretto è cambiato?): {r.url}"
-            )
-        total = int(r.headers.get("Content-Length", 0) or 0)
-        done = 0
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=256 * 1024):
-                if chunk:
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress_cb and total:
-                        progress_cb(int(done * 100 / total), dest.name)
-        tmp.rename(dest)
+    parsed = urlparse(url)
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": f"{parsed.scheme}://{parsed.netloc}/"}
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with requests.get(url, stream=True, timeout=120, headers=headers, allow_redirects=True) as r:
+            r.raise_for_status()
+            if "html" in (r.headers.get("Content-Type") or "").lower():
+                raise DownloadError(
+                    f"Il server ha risposto con una pagina HTML invece del file "
+                    f"(l'URL diretto è cambiato?): {r.url}"
+                )
+            total = int(r.headers.get("Content-Length", 0) or 0)
+            done = 0
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        done += len(chunk)
+                        if progress_cb and total:
+                            progress_cb(int(done * 100 / total), dest.name)
+        if not zipfile.is_zipfile(tmp):
+            raise DownloadError(f"Il file scaricato da {url} non è un IPA valido")
+        tmp.replace(dest)  # replace: su Windows rename fallisce se dest esiste già
+    finally:
+        tmp.unlink(missing_ok=True)
     if progress_cb:
         progress_cb(100, dest.name)
     return dest
 
 
+def _direct_dest_name(tool: JailbreakTool) -> str:
+    """Nome locale per un download diretto: sempre con estensione .ipa
+    (es. phoenixpwn.com/download.php -> phoenix.ipa)."""
+    name = tool.direct_ipa_url.rsplit("/", 1)[-1].split("?")[0]
+    return f"{tool.id}-{name}" if name.lower().endswith(".ipa") else f"{tool.id}.ipa"
+
+
 def fetch_tool_ipa(tool: JailbreakTool, dest_dir: Path | None = None, progress_cb=None) -> Path:
     """Scarica l'IPA ufficiale del tool: da GitHub release o URL diretto del sito."""
-    dest_dir = dest_dir or DOWNLOAD_DIR
+    dest_dir = Path(dest_dir) if dest_dir else download_dir()
     if tool.repo:
         info = latest_ipa_asset(tool.repo)
-        dest = dest_dir / f"{tool.repo.split('/')[0]}-{tool.repo.split('/')[1]}-{info['tag']}-{info['name']}"
+        owner, repo = tool.repo.split("/", 1)
+        dest = dest_dir / f"{owner}-{repo}-{info['tag']}-{info['name']}"
         if dest.exists() and dest.stat().st_size == info["size"] and info["size"] > 0:
             logger.info("IPA già presente: %s", dest)
             return dest
         return download_url(info["url"], dest, progress_cb)
     if tool.direct_ipa_url:
-        name = tool.direct_ipa_url.rsplit("/", 1)[-1].split("?")[0] or f"{tool.id}.ipa"
-        dest = dest_dir / f"{tool.id}-{name}"
-        if dest.exists() and dest.stat().st_size > 0:
+        dest = dest_dir / _direct_dest_name(tool)
+        if dest.exists() and zipfile.is_zipfile(dest):
             logger.info("IPA già presente: %s", dest)
             return dest
         return download_url(tool.direct_ipa_url, dest, progress_cb)

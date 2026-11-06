@@ -148,7 +148,7 @@ class GsaClient:
             "X-Apple-I-SRL-NO": "0",
         }
 
-    def _cpd(self) -> dict:
+    def _cpd(self, anisette: dict | None = None) -> dict:
         """Client Provided Data: meta + anisette uniti (come richiede GSA)."""
         cpd = {
             "bootstrap": True,
@@ -158,21 +158,27 @@ class GsaClient:
             "svct": "iCloud",
         }
         cpd.update(self._meta_headers())
-        cpd.update(self._get_anisette())
+        cpd.update(anisette if anisette is not None else self._get_anisette())
         return cpd
+
+    @staticmethod
+    def client_info(anisette: dict) -> str:
+        """X-MMe-Client-Info coerente con la fonte anisette (iTunes/AuthKitWin o emulata)."""
+        return anisette.get("X-Mme-Client-Info") or anisette.get("X-MMe-Client-Info") or CLIENT_INFO
 
     def _gsa_request(self, params: dict) -> dict:
         action = str(params.get("o", "?"))
         self._notify(f"[GSA] → POST gsa.apple.com/grandslam/GsService2 (azione: {action})…")
+        anisette = self._get_anisette()
         body = {
             "Header": {"Version": "1.0.1"},
-            "Request": {"cpd": self._cpd(), **params},
+            "Request": {"cpd": self._cpd(anisette), **params},
         }
         headers = {
             "Content-Type": "text/x-xml-plist",
             "Accept": "*/*",
             "User-Agent": USER_AGENT,
-            "X-MMe-Client-Info": CLIENT_INFO,
+            "X-MMe-Client-Info": self.client_info(anisette),
         }
         resp = self._session.post(
             GSA_URL,
@@ -203,6 +209,14 @@ class GsaClient:
             )
         return response
 
+    def _anisette_http_headers(self) -> dict[str, str]:
+        """Meta + anisette come header HTTP, con un solo X-MMe-Client-Info coerente."""
+        anisette = self._get_anisette()
+        headers = dict(self._meta_headers())
+        headers.update({k: v for k, v in anisette.items() if k.lower() != "x-mme-client-info"})
+        headers["X-MMe-Client-Info"] = self.client_info(anisette)
+        return headers
+
     # --------------------------------------------------------------- 2FA
     def trigger_2fa(self) -> None:
         """Chiede ad Apple di inviare il codice 2FA sui device fidati."""
@@ -215,10 +229,8 @@ class GsaClient:
             "X-Apple-Identity-Token": identity_token,
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "X-Xcode-Version": "11.2 (11B41)",
-            "X-MMe-Client-Info": CLIENT_INFO,
         }
-        headers.update(self._meta_headers())
-        headers.update(self._get_anisette())
+        headers.update(self._anisette_http_headers())
         resp = self._session.get(GSA_VERIFY_TRUSTED_DEVICE, headers=headers, timeout=self._timeout)
         logger.info("2FA: codice inviato ai dispositivi fidati (HTTP %s)", resp.status_code)
 
@@ -233,11 +245,9 @@ class GsaClient:
             "X-Apple-Identity-Token": identity_token,
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "X-Xcode-Version": "11.2 (11B41)",
-            "X-MMe-Client-Info": CLIENT_INFO,
             "security-code": code.strip(),
         }
-        headers.update(self._meta_headers())
-        headers.update(self._get_anisette())
+        headers.update(self._anisette_http_headers())
         resp = self._session.get(GSA_VALIDATE, headers=headers, timeout=self._timeout)
         if not resp.ok:
             raise GsaError(f"Codice 2FA rifiutato (HTTP {resp.status_code}). Riprova con un nuovo codice.")
@@ -433,7 +443,7 @@ class GsaClient:
 
 
 def default_anisette_getter():
-    """Anisette getter comodo: usa la sessione persistente locale."""
+    """Anisette getter comodo: iTunes se disponibile, altrimenti emulata."""
     from .anisette_provider import get_anisette_headers
 
     return get_anisette_headers()

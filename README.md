@@ -3,6 +3,25 @@
 Sideloader iOS **open source** per Windows, scritto da zero con componenti
 open source. Tutte le funzionalità attive da subito, nessun paywall.
 
+Include un **tab Jailbreak**: rileva il dispositivo collegato (iPhone, iPad,
+iPod touch), mostra i tool di jailbreak compatibili per il tuo modello × iOS
+e li installa direttamente scaricandoli **solo dalle release GitHub ufficiali**
+dei rispettivi progetti:
+
+| Tool | iOS (arm64 A8-A11) | iOS (arm64e A12+) | Tipo |
+|---|---|---|---|
+| Dopamine | 15.0 – 16.6.1 | 15.0 – 15.4.1 | Jailbreak (sideload) |
+| TrollInstallerX | 14.0 – 16.6.1 | 15.0 – 16.5.1 | Installer TrollStore |
+| unc0ver | 11.0 – 14.8 | 11.0 – 14.8 | Jailbreak (sideload) |
+| Taurine | 14.0 – 14.3 | 14.0 – 14.3 | Jailbreak (sideload) |
+| Nugget | 17.0 – 18.x | 17.0 – 18.x | Personalizzazione (non JB) |
+| palera1n | 15.0 – 17.x | ✗ (solo A8-A11) | **DFU da PC** (guida, non sideload) |
+
+⚠ Il repo Misaka originale è stato rimosso da GitHub: per installare
+TrollStore si usa TrollInstallerX (alfiecg24), l'installer mantenuto.
+I jailbreak checkm8 (palera1n) non sono installabili via sideload: richiedono
+la procedura DFU dal PC — il tab mostra la compatibilità e la guida.
+
 ## Com'è fatto
 
 | Componente | Tecnologia | Licenza |

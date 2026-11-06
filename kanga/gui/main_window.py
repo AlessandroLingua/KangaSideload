@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..core import device as device_mod
@@ -26,6 +28,7 @@ from ..core.appflow import AppFlow, AppFlowError
 from ..core.device import DeviceError
 from ..core.gsa import GsaError
 from ..core.signer import ZsignError, readable_size
+from .jailbreak_tab import JailbreakTab
 from .login_dialog import LoginDialog
 from .workers import GenericWorker, LoginFlow, start_worker
 
@@ -36,7 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Kanga Sideload")
-        self.resize(760, 560)
+        self.resize(780, 620)
         self.setAcceptDrops(True)
 
         self.ipa_path: Path | None = None
@@ -45,7 +48,24 @@ class MainWindow(QMainWindow):
         self._login_flow: LoginFlow | None = None
         self._devices: list = []
 
-        central = QFrame()
+        tabs = QTabWidget()
+        tabs.addTab(self._build_sideload_tab(), "Sideload")
+        tabs.addTab(JailbreakTab(self), "Jailbreak")
+        self.setCentralWidget(tabs)
+
+        self._log("Kanga Sideload avviato.")
+        if not device_mod.usbmux_available():
+            self._log("⚠ Servizio Apple Mobile Device non trovato: installa iTunes "
+                      "(versione classica) o l'app 'Apple Devices' dal Microsoft Store "
+                      "per comunicare con l'iPhone.")
+        session = self.flow.restore_session()
+        if session and session.xcode_token:
+            self._log("Sessione Apple presente: puoi firmare e installare direttamente.")
+            self.btn_login.setText("Esci / cambia account")
+            self.btn_install.setEnabled(True)
+
+    def _build_sideload_tab(self) -> QWidget:
+        central = QWidget()
         layout = QVBoxLayout(central)
 
         # --- riga IPA ---
@@ -100,17 +120,7 @@ class MainWindow(QMainWindow):
         self.txt_log.setReadOnly(True)
         layout.addWidget(self.txt_log, 1)
 
-        self.setCentralWidget(central)
-        self._log("Kanga Sideload avviato.")
-        if not device_mod.usbmux_available():
-            self._log("⚠ Servizio Apple Mobile Device non trovato: installa iTunes "
-                      "(versione classica) o l'app 'Apple Devices' dal Microsoft Store "
-                      "per comunicare con l'iPhone.")
-        session = self.flow.restore_session()
-        if session and session.xcode_token:
-            self._log("Sessione Apple presente: puoi firmare e installare direttamente.")
-            self.btn_login.setText("Esci / cambia account")
-            self.btn_install.setEnabled(True)
+        return central
 
     # ------------------------------------------------------------- helpers
     def _log(self, msg: str):

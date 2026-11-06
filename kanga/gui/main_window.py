@@ -116,6 +116,10 @@ class MainWindow(QMainWindow):
         self._install_ctx: tuple[IpaInfo, DeviceInfo, str | None] | None = None
         self._step_index = 0
         self.last_result: SideloadResult | None = None
+        # ultimo tentativo di login (apple_id, password, ricorda) ed errore, solo in
+        # memoria: se il login fallisce il dialog si ripresenta già compilato
+        self._last_login: tuple[str, str, bool] | None = None
+        self._last_login_error: tuple[str, str] | None = None
 
         root = QWidget()
         root.setObjectName("Page")
@@ -496,23 +500,43 @@ class MainWindow(QMainWindow):
         return store.credentials_supported() and store.has_credentials()
 
     def _create_login_dialog(self) -> LoginDialog:
+        """Dialog di login già compilato, nell'ordine: ultimo tentativo di questa
+        sessione (es. dopo un errore di Apple), credenziali salvate, ultimo Apple ID."""
         saved = store.load_credentials() if store.credentials_supported() else None
-        if saved:
-            # password salvata (DPAPI): il dialog parte da solo, chiede solo l'eventuale 2FA
-            apple_id, password = saved
+        error = self._last_login_error
+        if self._last_login:
+            apple_id, password, remember = self._last_login
+            auto = False  # c'è già stato un tentativo: si riprova premendo «Accedi»
+        elif saved:
+            (apple_id, password), remember = saved, True
+            # password salvata (DPAPI): parte da solo, chiede solo l'eventuale 2FA
+            auto = error is None
+        else:
+            apple_id = str(self._settings.value("last_apple_id", "") or "")
+            password, remember, auto = "", False, False
+        if auto:
             self._log(f"Accesso automatico con le credenziali salvate ({apple_id})…")
-            return LoginDialog(self.flow, self, apple_id=apple_id, password=password,
-                               remember=True, auto_submit=True)
-        return LoginDialog(self.flow, self, apple_id=str(self._settings.value("last_apple_id", "") or ""))
+        dlg = LoginDialog(self.flow, self, apple_id=apple_id, password=password,
+                          remember=remember, auto_submit=auto)
+        if error:
+            dlg.show_error(f"Tentativo precedente non riuscito: {error[0]}", error[1])
+        return dlg
 
     def _login(self) -> bool:
         """Apre il dialog di login; True se l'accesso è riuscito."""
         dlg = self._create_login_dialog()
         ok = dlg.exec() == QDialog.DialogCode.Accepted
+        attempt = getattr(dlg, "last_attempt", None)
+        if attempt:
+            self._last_login = attempt
         if ok:
+            self._last_login_error = None
             self._settings.setValue("last_apple_id", dlg.apple_id)
             self._log("Accesso effettuato: firma e installazione abilitate.")
             self.statusBar().showMessage("Accesso effettuato", 4000)
+        elif getattr(dlg, "last_error", None):
+            self._last_login_error = dlg.last_error
+            self._log(f"⚠ Accesso non riuscito: {dlg.last_error[0]}")
         self._refresh_account()
         return ok
 
@@ -529,6 +553,7 @@ class MainWindow(QMainWindow):
             )
             if answer == QMessageBox.StandardButton.Yes:
                 self.flow.logout()
+                self._last_login = self._last_login_error = None
                 if self._auto_login_available():
                     # «Esci» deve davvero disconnettere: niente accesso automatico al prossimo avvio
                     store.clear_credentials()

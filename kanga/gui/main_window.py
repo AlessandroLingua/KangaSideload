@@ -58,6 +58,11 @@ class _GuiLogHandler(logging.Handler):
 
 
 class MainWindow(QMainWindow):
+    # signal per aggiornamenti thread-safe: i worker li emettono da qualunque
+    # thread e Qt li recapita nel thread GUI
+    _log_sig = Signal(str)
+    _flow_sig = Signal(str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Kanga Sideload")
@@ -74,6 +79,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_sideload_tab(), "Sideload")
         tabs.addTab(JailbreakTab(self), "Jailbreak")
         self.setCentralWidget(tabs)
+
+        # recapito thread-safe di log ed eventi dal worker al thread GUI
+        self._log_sig.connect(self.txt_log.append)
+        self._flow_sig.connect(self._on_flow_event_impl)
 
         self._log("Kanga Sideload avviato.")
         if not device_mod.usbmux_available():
@@ -158,9 +167,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- helpers
     def _log(self, msg: str):
-        self.txt_log.append(msg)
+        self._log_sig.emit(msg)
 
     def _on_flow_event(self, tag: str, msg: str):
+        # chiamato da thread worker: emette via signal -> esegue nel thread GUI
+        self._flow_sig.emit(tag, msg)
+
+    def _on_flow_event_impl(self, tag: str, msg: str):
         if tag == "log":
             self._log(msg)
         elif tag == "progress":

@@ -7,6 +7,33 @@ import traceback
 from PySide6.QtCore import QObject, QThread, Signal
 
 
+class _WorkerRelay(QObject):
+    """Esegue i callback ok/fail/event NEL THREAD GUI.
+
+    I signal del worker sono connessi al relay (QObject creato nel thread
+    GUI): Qt usa quindi una queued connection e i callback Python girano
+    sempre nel thread principale, anche se sono semplici lambda.
+    """
+
+    def __init__(self, on_ok=None, on_fail=None, on_event=None):
+        super().__init__()
+        self._on_ok = on_ok
+        self._on_fail = on_fail
+        self._on_event = on_event
+
+    def do_ok(self, result):
+        if self._on_ok:
+            self._on_ok(result)
+
+    def do_fail(self, msg):
+        if self._on_fail:
+            self._on_fail(msg)
+
+    def do_event(self, tag, msg):
+        if self._on_event:
+            self._on_event(tag, msg)
+
+
 class GenericWorker(QThread):
     """Esegue una funzione in un thread separato con eventi verso la UI."""
 
@@ -89,11 +116,11 @@ class LoginFlow(QObject):
 
 def start_worker(fn, on_ok=None, on_fail=None, on_event=None, *args, **kwargs) -> GenericWorker:
     w = GenericWorker(fn, *args, **kwargs)
-    if on_ok:
-        w.finished_ok.connect(on_ok)
-    if on_fail:
-        w.failed.connect(on_fail)
-    if on_event:
-        w.event.connect(on_event)
+    # il relay vive nel thread GUI: i callback girano sempre lì.
+    # il riferimento resta sul worker per evitare il garbage collector
+    w._relay = _WorkerRelay(on_ok, on_fail, on_event)
+    w.finished_ok.connect(w._relay.do_ok)
+    w.failed.connect(w._relay.do_fail)
+    w.event.connect(w._relay.do_event)
     w.start()
     return w

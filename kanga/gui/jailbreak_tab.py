@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -35,9 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 class JailbreakTab(QWidget):
+    _log_sig = Signal(str)
+
     def __init__(self, main_window):
         super().__init__()
         self._main = main_window
+        self._log_sig.connect(self._append_log)
         self._device = None  # DeviceInfo corrente
         self._compat: list[Compatibility] = []
         self._download_worker = None
@@ -274,5 +277,8 @@ class JailbreakTab(QWidget):
         )
 
     def _log(self, msg: str):
+        self._log_sig.emit(msg)
+
+    def _append_log(self, msg: str):
         self.txt_log.append(msg)
         self._main._log(msg)

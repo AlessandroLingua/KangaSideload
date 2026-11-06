@@ -1,6 +1,6 @@
 [project]
 name = "kanga-sideload"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sideloader iOS open source per Windows (firma + installazione con account Apple gratuito)"
 requires-python = ">=3.12"
 license = { text = "GPL-3.0-or-later" }
@@ -13,6 +13,16 @@ dependencies = [
     # NOTA: pysrp è vendorizzato in kanga/core/_vendor/srp (MIT, cocagne/pysrp)
     # perché su PyPI il nome 'pysrp' è stato riutilizzato da un pacchetto diverso.
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4"]
+
+[project.gui-scripts]
+kanga-sideload = "kanga.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
 
 [tool.uv]
 # assicura che la venv locale .venv sia usata

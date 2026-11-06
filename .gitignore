@@ -10,3 +10,4 @@ kanga/tools/zsign/
 *.kanga-session.json
 adi/
 test_output/
+.pytest_cache/

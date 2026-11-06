@@ -12,10 +12,12 @@ Endpoint verificati contro le implementazioni open di riferimento
 """
 from __future__ import annotations
 
+import base64
 import logging
 import plistlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -52,9 +54,10 @@ class Certificate:
     @classmethod
     def from_dict(cls, d: dict) -> "Certificate":
         return cls(
-            serial_number=str(d.get("serialNumber", "")),
-            name=str(d.get("name", d.get("commonName", ""))),
-            cert_content=str(d.get("certContent", "")),
+            serial_number=str(d.get("serialNumber") or d.get("serialNum") or ""),
+            name=str(d.get("name") or d.get("commonName") or ""),
+            # Apple restituisce certContent come <data> (DER): lo normalizziamo in PEM
+            cert_content=certificate_to_pem(d.get("certContent")),
             expiration_date=str(d.get("expirationDate", "")),
         )
 
@@ -68,7 +71,6 @@ class ProvisioningProfile:
     app_id_name: str = ""  # TEAMID.bundleid
     expiration_date: str = ""
     raw: bytes = b""  # il file .mobileprovision completo, pronto per zsign
-    entitlements: dict = field(default_factory=dict)
 
     @classmethod
     def from_apple(cls, d: dict) -> "ProvisioningProfile":
@@ -82,8 +84,6 @@ class ProvisioningProfile:
 
     def parsed(self) -> dict:
         """Parsa il contenuto plist del .mobileprovision."""
-        import plistlib
-
         if not self.raw:
             return {}
         data = self.raw
@@ -92,7 +92,18 @@ class ProvisioningProfile:
         end = data.find(b"</plist>")
         if start == -1 or end == -1:
             return {}
-        return plistlib.loads(data[start : end + 8])
+        try:
+            parsed = plistlib.loads(data[start : end + 8])
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def expires(self) -> datetime | None:
+        """Scadenza del profilo (UTC): con un account gratuito ~7 giorni."""
+        value = self.parsed().get("ExpirationDate")
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return None
 
     def entitlements(self) -> dict:
         return self.parsed().get("Entitlements", {})
@@ -260,6 +271,47 @@ def generate_csr_and_key(common_name: str = "Kanga Dev", email: str = "") -> tup
         serialization.NoEncryption(),
     )
     return csr_pem, key_pem, b""
+
+
+def certificate_to_pem(content) -> str:
+    """Normalizza un certificato (DER in bytes, PEM, o DER in base64) in PEM. "" se assente/invalido."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    if not content:
+        return ""
+    if isinstance(content, (bytes, bytearray)):
+        data = bytes(content)
+        if data.lstrip().startswith(b"-----BEGIN"):
+            return data.decode("ascii", errors="ignore").strip() + "\n"
+        der = data
+    else:
+        text = str(content).strip()
+        if text.startswith("-----BEGIN"):
+            return text + "\n"
+        try:
+            der = base64.b64decode(text, validate=True)
+        except Exception:
+            return ""
+    try:
+        cert = x509.load_der_x509_certificate(der)
+    except Exception:
+        return ""
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def cert_matches_key(cert_pem: str, key_pem: bytes) -> bool:
+    """True se la chiave privata corrisponde alla chiave pubblica del certificato."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode())
+        key = serialization.load_pem_private_key(key_pem, password=None)
+    except Exception:
+        return False
+    fmt = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return cert.public_key().public_bytes(*fmt) == key.public_key().public_bytes(*fmt)
 
 
 def build_p12(cert_pem: str, key_pem: bytes, p12_password: str) -> bytes:

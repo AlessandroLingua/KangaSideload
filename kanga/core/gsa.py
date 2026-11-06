@@ -116,14 +116,22 @@ def apple_ca_bundle() -> str:
 
 
 class GsaClient:
-    def __init__(self, anisette_getter, timeout: float = 30.0):
-        """anisette_getter: callable -> dict con gli header anisette."""
+    def __init__(self, anisette_getter, timeout: float = 30.0, on_event=None):
+        """anisette_getter: callable -> dict con gli header anisette.
+        on_event: callable(str) per mostrare ogni passo nel log della GUI."""
         self._get_anisette = anisette_getter
         self._timeout = timeout
+        self._on_event = on_event or (lambda msg: None)
         self._session = requests.Session()
         self._session.verify = apple_ca_bundle()
         self._local_user_id = str(uuid.uuid4()).upper()
         self._device_id = str(uuid.uuid4()).upper()
+
+    def _notify(self, msg: str):
+        try:
+            self._on_event(msg)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ HTTP
     def _meta_headers(self) -> dict[str, str]:
@@ -154,6 +162,8 @@ class GsaClient:
         return cpd
 
     def _gsa_request(self, params: dict) -> dict:
+        action = str(params.get("o", "?"))
+        self._notify(f"[GSA] → POST gsa.apple.com/grandslam/GsService2 (azione: {action})…")
         body = {
             "Header": {"Version": "1.0.1"},
             "Request": {"cpd": self._cpd(), **params},
@@ -170,7 +180,9 @@ class GsaClient:
             data=plistlib.dumps(body, fmt=plistlib.FMT_XML),
             timeout=self._timeout,
         )
+        self._notify(f"[GSA] ← risposta HTTP {resp.status_code}")
         if resp.status_code == 503:
+            self._notify("[GSA] ✗ Apple ha bloccato la richiesta (503)")
             raise GsaError(
                 "Apple sta respingendo le richieste di login da questo tipo di "
                 "anisette (HTTP 503 all'endpoint GsService2 — famiglia errori "
@@ -182,7 +194,14 @@ class GsaClient:
         data = plistlib.loads(resp.content)
         if "Response" not in data:
             raise GsaError("Risposta GSA non valida (nessun campo Response)")
-        return data["Response"]
+        response = data["Response"]
+        self._notify(f"[GSA] ← campi risposta: {', '.join(sorted(response.keys()))}")
+        status = response.get("Status") or {}
+        if status:
+            self._notify(
+                f"[GSA] ← Status: ec={status.get('ec')} em={str(status.get('em'))[:60]!r}"
+            )
+        return response
 
     # --------------------------------------------------------------- 2FA
     def trigger_2fa(self) -> None:
@@ -255,8 +274,10 @@ class GsaClient:
         srp.rfc5054_enable()
         srp.no_username_in_x()
 
+        self._notify("[SRP] Genero chiave effimera A…")
         usr = srp.User(apple_id, b"", hash_alg=SHA256, ng_type=NG_2048)
         _, A = usr.start_authentication()
+        self._notify(f"[SRP] A generata ({len(A)} byte), invio init…")
 
         resp = self._gsa_request({
             "A2k": A,
@@ -279,11 +300,17 @@ class GsaClient:
         B = resp["B"]
         c = resp["c"]
         iterations = int(resp["i"])
+        self._notify(
+            f"[SRP] Server: protocollo={protocol}, iterazioni={iterations}, "
+            f"salt={len(salt)}B, B={len(B)}B"
+        )
 
+        self._notify(f"[SRP] Derivo password con s2k ({iterations} iterazioni)…")
         usr.p = s2k_hash(password, salt, iterations, protocol)
         M1 = usr.process_challenge(salt, B)
         if M1 is None:
             raise GsaError("Challenge SRP non valida (risposta server sospetta)")
+        self._notify("[SRP] M1 calcolato, invio complete…")
 
         resp = self._gsa_request({
             "c": c,
@@ -298,6 +325,7 @@ class GsaClient:
                 # 2FA richiesta: salva i token necessari per il flusso 2FA
                 self._pending_dsid = resp.get("dsid", "")
                 self._pending_idms_token = status.get("idmsToken", "")
+                self._notify("[2FA] Apple richiede il codice 2FA (au presente)")
                 logger.info("Apple richiede 2FA")
                 return None
             raise GsaError(
@@ -305,15 +333,19 @@ class GsaClient:
                 apple_code=status.get("ec"),
             )
 
+        self._notify("[SRP] M2 ricevuto: verifico il server…")
         usr.verify_session(resp["M2"])
         if not usr.authenticated():
             raise GsaError("Verifica server SRP fallita (M2 non valido)")
+        self._notify("[SRP] Sessione verificata: chiave di sessione stabilita")
 
         if "spd" not in resp:
             raise GsaError("Login ok ma mancano i dati di servizio (spd)")
 
+        self._notify(f"[GSA] Decifro spd ({len(resp['spd'])} byte, AES-256-CBC)…")
         spd_plain = decrypt_spd(usr.get_session_key(), resp["spd"])
         spd = plistlib.loads(spd_plain, fmt=plistlib.FMT_XML)
+        self._notify(f"[GSA] spd decifrata: {len(spd)} campi (adsid={str(spd.get('adsid',''))[:8]}…)")
 
         return self._build_session(spd)
 
@@ -331,6 +363,7 @@ class GsaClient:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         app = "com.apple.gs.xcode.auth"
+        self._notify(f"[GSA] Richiedo Xcode token ({app}) via apptokens…")
         sk = spd["sk"]
         if isinstance(sk, str):
             sk = b64.b64decode(sk)
@@ -350,12 +383,14 @@ class GsaClient:
             raise GsaError(f"Risposta apptokens senza 'et': {resp.get('Status')}")
         if len(et) < 35 or et[:3] != b"XYZ":
             raise GsaError("Blob token cifrato malformato")
+        self._notify(f"[GSA] Decifro token (AES-GCM, {len(et)} byte)…")
         iv = et[3:19]
         plaintext = AESGCM(sk).decrypt(iv, et[19:], b"XYZ")
         token_plist = plistlib.loads(plaintext)
         token_info = token_plist.get("t", {}).get(app)
         if not token_info or not token_info.get("token"):
             raise GsaError("Xcode token non presente nella risposta apptokens")
+        self._notify("[GSA] Xcode token ottenuto")
         return str(token_info["token"])
 
     def _build_session(self, spd: dict) -> AppleSession:
@@ -363,6 +398,7 @@ class GsaClient:
             k: v.value if hasattr(v, "value") else v
             for k, v in self._session.cookies.items()
         }
+        self._notify(f"[GSA] Cookie ricevuti: {', '.join(sorted(cookies.keys())) or 'nessuno'}")
         tokens = {}
         t = spd.get("t") or {}
         for key, val in t.items():

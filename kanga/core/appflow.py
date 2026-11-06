@@ -59,8 +59,15 @@ class AppFlow:
 
     # ---------------------------------------------------------------- login
     def login(self, apple_id: str, password: str, on_2fa=None) -> AppleSession:
-        self.log("Autenticazione con Apple (GSA)...")
-        client = GsaClient(default_anisette_getter)
+        self.log(f"Autenticazione con Apple (GSA) per {apple_id}…")
+        self.log(f"[ANISETTE] Genero header anisette dalla sessione locale…")
+        try:
+            headers = default_anisette_getter()
+            self.log(f"[ANISETTE] OK: {', '.join(sorted(headers.keys()))}")
+        except Exception as e:
+            self.log(f"[ANISETTE] ✗ Errore anisette: {e}")
+            raise
+        client = GsaClient(default_anisette_getter, on_event=self.log)
         apple_session = client.login(apple_id, password, on_2fa=on_2fa)
         if not apple_session.xcode_token:
             raise AppFlowError(

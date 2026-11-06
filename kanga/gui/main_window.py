@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -33,6 +33,28 @@ from .login_dialog import LoginDialog
 from .workers import GenericWorker, LoginFlow, start_worker
 
 logger = logging.getLogger(__name__)
+
+
+class _GuiLogBridge(QObject):
+    """Instrada i log del modulo logging verso la finestra (thread-safe via Signal)."""
+
+    line = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+
+class _GuiLogHandler(logging.Handler):
+    def __init__(self, bridge: _GuiLogBridge):
+        super().__init__()
+        self._bridge = bridge
+        self.setFormatter(logging.Formatter("%(levelname).1s %(name)s: %(message)s"))
+
+    def emit(self, record):
+        try:
+            self._bridge.line.emit(self.format(record))
+        except Exception:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -120,12 +142,23 @@ class MainWindow(QMainWindow):
         self.txt_log.setReadOnly(True)
         layout.addWidget(self.txt_log, 1)
 
+        # instrada i log di sistema (kanga.* a livello INFO, terze parti WARNING)
+        # dentro il log della finestra, da qualunque thread
+        bridge = _GuiLogBridge(self)
+        bridge.line.connect(self.txt_log.append)
+        gui_handler = _GuiLogHandler(bridge)
+        logging.getLogger("kanga").addHandler(gui_handler)
+        logging.getLogger("kanga").setLevel(logging.INFO)
+        for name in ("pymobiledevice3", "requests", "urllib3", "anisette"):
+            lg = logging.getLogger(name)
+            lg.addHandler(gui_handler)
+            lg.setLevel(logging.WARNING)
+
         return central
 
     # ------------------------------------------------------------- helpers
     def _log(self, msg: str):
         self.txt_log.append(msg)
-        logger.info(msg)
 
     def _on_flow_event(self, tag: str, msg: str):
         if tag == "log":
@@ -206,40 +239,51 @@ class MainWindow(QMainWindow):
 
         dlg = LoginDialog(self)
         login_flow = LoginFlow(self.flow, "", "")
-        login_flow.log.connect(lambda m: dlg.status(m))
-        login_flow.need_2fa.connect(lambda: (dlg.show_2fa(), dlg.exec()))
+        # connessioni a metodi bound di MainWindow: Qt le esegue nel thread GUI
+        login_flow.log.connect(dlg.status)
+        login_flow.log.connect(self._on_login_log)
+        login_flow.need_2fa.connect(self._on_need_2fa)
+        login_flow.finished_ok.connect(self._on_login_ok)
+        login_flow.failed.connect(self._on_login_fail)
 
-        def on_ok(session):
-            dlg.accept()
-            self.btn_login.setText("Esci / cambia account")
-            self.btn_install.setEnabled(True)
-            self._log("Sessione pronta: firma e installazione abilitate.")
+        self._login_dlg = dlg
+        self._login_flow = login_flow
+        if not dlg.exec():
+            return
+        login_flow._apple_id = dlg.apple_id
+        login_flow._password = dlg.password
+        dlg.status("Login in corso…")
+        self._log(f"[LOGIN] Avvio login per {dlg.apple_id}")
+        from PySide6.QtCore import QThread
 
-        def on_fail(msg):
-            dlg.status(f"Errore: {msg}")
-            dlg.reset_for_retry()
+        t = QThread(self)
+        login_flow.moveToThread(t)
+        t.started.connect(login_flow.run)
+        t.start()
+        self._login_thread = t
 
-        login_flow.finished_ok.connect(on_ok)
-        login_flow.failed.connect(on_fail)
+    def _on_login_log(self, msg: str):
+        self._log(msg)
 
-        while True:
-            if not dlg.exec():
-                return
-            login_flow._apple_id = dlg.apple_id
-            login_flow._password = dlg.password
-            dlg.status("Login in corso…")
-            self._login_flow = login_flow
-            from PySide6.QtCore import QThread
+    def _on_need_2fa(self):
+        dlg = self._login_dlg
+        dlg.show_2fa()
+        dlg.exec()
+        code = dlg.code()
+        if code:
+            self._login_flow.provide_code(code)
 
-            t = QThread(self)
-            login_flow.moveToThread(t)
-            t.started.connect(login_flow.run)
-            t.start()
-            self._login_thread = t
-            if dlg.result() and dlg.code():
-                # il codice 2FA è stato inserito: passa al worker il codice e continua
-                login_flow.provide_code(dlg.code())
-            break
+    def _on_login_ok(self, session):
+        self._login_dlg.accept()
+        self.btn_login.setText("Esci / cambia account")
+        self.btn_install.setEnabled(True)
+        self._log("Sessione pronta: firma e installazione abilitate.")
+
+    def _on_login_fail(self, msg):
+        dlg = self._login_dlg
+        dlg.status(f"Errore: {msg}")
+        dlg.reset_for_retry()
+        self._log(f"[LOGIN] ✗ Fallito: {msg}")
 
     # ------------------------------------------------------------- install
     def _start_install(self):

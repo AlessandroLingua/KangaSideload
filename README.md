@@ -127,16 +127,33 @@ l'anisette via librerie iTunes/kbsync ("macchina reale").
 
 Per questo Kanga usa **per prima l'anisette di iTunes**: le DLL Apple
 originali (`AOSKit.dll`, `objc.dll`, `Foundation.dll`) di iTunes / iCloud per
-Windows, la stessa strada di Sideloadly e AltServer. Cartelle cercate: quelle
-di iTunes e di *Apple Application Support* (e il set di 3uTools). Se le DLL
-sono a 32 bit serve un Python 32-bit in `%LOCALAPPDATA%/Kanga/py32/` che esegue
-`kanga/tools/itunes_anisette32.py`. Se l'anisette iTunes non è disponibile Kanga
-ripiega da solo su quella emulata; il Registro mostra quale fonte è stata usata.
-Per forzarne una: `KANGA_ANISETTE=itunes|emulata|auto`.
+Windows, la stessa strada di Sideloadly e AltServer.
+
+**Cosa installare:** [iTunes](https://www.apple.com/itunes/download/win64) e
+iCloud per Windows scaricati **dal sito Apple, non dal Microsoft Store** (le
+versioni dello Store non espongono le DLL; il link all'installer di iCloud è
+nella [guida di AltStore](https://faq.altstore.io/altstore-classic/how-to-install-altstore-windows)).
+Se hai già le versioni dello Store disinstallale prima.
+
+Cartelle cercate, in ordine: `Common Files\Apple\Internet Services` (AOSKit,
+da iCloud) + `Common Files\Apple\Apple Application Support` (objc/Foundation,
+da iTunes), poi set in un'unica cartella (es. 3uTools). Per indicarne una:
+`KANGA_APPLE_DLL_DIR="<dir AOSKit>;<dir objc>"`. Le DLL vengono caricate da
+`kanga/tools/itunes_anisette_helper.py` in un processo separato (con un Python
+della stessa architettura: per DLL a 32 bit serve `%LOCALAPPDATA%/Kanga/py32/`).
+Se nessun set funziona Kanga ripiega da solo su quella emulata, il Registro
+mostra quale fonte è stata usata e un 503 spiega cosa installare; al login
+successivo riprova iTunes, quindi non serve riavviare dopo l'installazione.
+Per forzare una fonte: `KANGA_ANISETTE=itunes|emulata|auto`.
 
 Conseguenze pratiche:
 - con l'anisette emulata il POST di login può ricevere 503: l'app lo segnala
   chiaramente
+- anche con l'anisette di iTunes Apple può rispondere 503 alla richiesta del
+  token di firma (`apptokens`) dopo un login riuscito: succede quando la
+  connessione keep-alive resta legata a un nodo Apple guasto. Kanga apre una
+  connessione nuova per ogni richiesta e ripete `apptokens` (che non reinvia la
+  password) fino a 4 volte, come AltSign, xtool e iloader
 - la sessione Apple, una volta ottenuta, viene salvata in
   `%LOCALAPPDATA%/Kanga/session.kanga.json` e dura finché Apple non la
   invalida — riusata ad ogni avvio senza ri-login
@@ -186,7 +203,7 @@ kanga/
 │   ├── widgets.py         card, drop zone, step, banner
 │   ├── theme.py · icons.py · format.py
 └── tools/
-    ├── itunes_anisette32.py  helper per le DLL Apple a 32 bit
+    ├── itunes_anisette_helper.py  carica le DLL Apple in un processo separato
     └── zsign/             binario scaricato da scripts/fetch_zsign.py
 scripts/fetch_zsign.py     download di zsign da riga di comando
 tests/                     suite pytest (servizi Apple, iPhone e zsign simulati)

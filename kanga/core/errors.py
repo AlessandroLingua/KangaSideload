@@ -47,9 +47,25 @@ def friendly_error(err) -> FriendlyError:
         return FriendlyError(title=title, message=message, hint=hint, detail=text)
 
     # --- login Apple -------------------------------------------------------
+    if _has(text, "apptokens") and not _has(text, "anisette emulata"):
+        return make(
+            "Apple non ha rilasciato il token di firma",
+            "Apple ID e password sono corretti, ma i server Apple hanno rifiutato la "
+            "richiesta del token che serve per firmare le app, anche ripetendola. È un "
+            "problema intermittente noto dei server Apple, che colpisce anche altri sideloader.",
+            "Riprova tra qualche minuto premendo «Accedi».",
+        )
     if _has(text, "-80045", "-80046") or ("GsaError" in classes and "503" in text) or _has(
         text, "HTTP 503"
     ):
+        if _has(text, "anisette emulata"):
+            return make(
+                "Apple ha rifiutato l'accesso",
+                "Apple blocca l'anisette emulata che Kanga usa quando non trova le DLL "
+                "Apple di iTunes e iCloud.",
+                "Installa iTunes e iCloud per Windows scaricati dal sito Apple (non dal "
+                "Microsoft Store), poi riprova: Kanga userà le loro librerie, come Sideloadly.",
+            )
         return make(
             "Apple ha rifiutato l'accesso",
             "Apple sta bloccando gli accessi provenienti da strumenti non ufficiali "

@@ -67,3 +67,14 @@ def test_gsa_client_info_follows_anisette():
     keys = [k for k in headers if k.lower() == "x-mme-client-info"]
     assert keys == ["X-MMe-Client-Info"] and headers["X-MMe-Client-Info"] == "<win>"
     assert headers["X-Apple-I-MD"] == "otp"
+
+
+def test_retry_itunes_after_installing_it():
+    itunes, emu = Source("itunes", fail=True), Source("emu")
+    a = ap.AutoAnisette("auto", itunes_factory=lambda: itunes, emulated_factory=lambda: emu)
+    assert a.get_headers()["X-Apple-I-MD"] == "emu"
+    itunes.fail = False          # l'utente installa iTunes e iCloud
+    a.retry_itunes()             # nuovo login
+    assert a.get_headers()["X-Apple-I-MD"] == "itunes"
+    assert a.source == ap.SOURCE_ITUNES and a.fallback_reason == ""
+    assert itunes.calls == 2     # la prova riusa i propri header: nessuna chiamata doppia

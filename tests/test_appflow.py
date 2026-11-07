@@ -253,3 +253,36 @@ def test_unique_bundle_id_is_stable():
     assert a.startswith("com.example.") and a.endswith("app") and a != "com.example.app"
     assert _unique_bundle_id(a, "ADSID") == a  # già trasformato: invariato
     assert _unique_bundle_id("single", "ADSID").startswith("single.")
+
+
+def test_503_with_emulated_anisette_suggests_itunes(monkeypatch, appdata):
+    from kanga.core.anisette_provider import SOURCE_EMULATED
+    from kanga.core.errors import friendly_error
+    from kanga.core.gsa import GsaError
+
+    class Emulated:
+        source = SOURCE_EMULATED
+        fallback_reason = "DLL Apple non trovate"
+        retried = 0
+
+        def retry_itunes(self):
+            self.retried += 1
+
+        def get_headers(self):
+            return {}
+
+    class BlockedGsa:
+        def __init__(self, getter, **kwargs):
+            pass
+
+        def login(self, apple_id, password, on_2fa=None):
+            raise GsaError("Apple sta respingendo le richieste (HTTP 503 all'endpoint GsService2)")
+
+    monkeypatch.setattr(appflow, "GsaClient", BlockedGsa)
+    ani = Emulated()
+    with pytest.raises(GsaError, match="anisette emulata") as info:
+        AppFlow(anisette=ani).login("a@b.c", "pw")
+    assert ani.retried == 1  # ogni nuovo login riprova prima le DLL di iTunes
+    fe = friendly_error(info.value)
+    assert fe.title == "Apple ha rifiutato l'accesso"
+    assert "Microsoft Store" in fe.hint and "iCloud" in fe.hint

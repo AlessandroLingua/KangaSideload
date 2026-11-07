@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import logging
 import platform
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,16 +44,26 @@ GSA_VERIFY_TRUSTED_DEVICE = "https://gsa.apple.com/auth/verify/trusteddevice"
 GSA_VALIDATE = "https://gsa.apple.com/grandslam/GsService2/validate"
 
 USER_AGENT = "akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0"
+
+# NEW_CONNECTION_NOTE: GSA "lega" una connessione keep-alive a un nodo interno; se
+# quel nodo inizia a fallire, tutte le richieste successive sulla stessa connessione
+# ricevono 5xx (tipico: init 200, complete 200, apptokens 503). Per questo ogni
+# richiesta usa una connessione nuova ("Connection: close") e apptokens, che non
+# reinvia la password, viene ripetuta sui 5xx temporanei (come AltSign/xtool/iloader).
+APPTOKENS_ATTEMPTS = 4
+RETRYABLE_STATUS = {502, 503, 504}
 CLIENT_INFO = "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"
 
 
 class GsaError(RuntimeError):
     """Errore di autenticazione GrandSlam (credenziali, Apple anisette, rete)."""
 
-    def __init__(self, message: str, apple_code: int | None = None, needs_2fa: bool = False):
+    def __init__(self, message: str, apple_code: int | None = None, needs_2fa: bool = False,
+                 http_status: int | None = None):
         super().__init__(message)
         self.apple_code = apple_code
         self.needs_2fa = needs_2fa
+        self.http_status = http_status
 
 
 @dataclass
@@ -122,6 +133,7 @@ class GsaClient:
         self._get_anisette = anisette_getter
         self._timeout = timeout
         self._on_event = on_event or (lambda msg: None)
+        self._sleep = time.sleep  # attesa tra i tentativi (sostituibile nei test)
         self._session = requests.Session()
         self._session.verify = apple_ca_bundle()
         self._local_user_id = str(uuid.uuid4()).upper()
@@ -179,6 +191,7 @@ class GsaClient:
             "Accept": "*/*",
             "User-Agent": USER_AGENT,
             "X-MMe-Client-Info": self.client_info(anisette),
+            "Connection": "close",  # vedi NEW_CONNECTION_NOTE
         }
         resp = self._session.post(
             GSA_URL,
@@ -187,16 +200,18 @@ class GsaClient:
             timeout=self._timeout,
         )
         self._notify(f"[GSA] ← risposta HTTP {resp.status_code}")
-        if resp.status_code == 503:
-            self._notify("[GSA] ✗ Apple ha bloccato la richiesta (503)")
-            raise GsaError(
-                "Apple sta respingendo le richieste di login da questo tipo di "
-                "anisette (HTTP 503 all'endpoint GsService2 — famiglia errori "
-                "-80045/-80046, ondata da ottobre 2025). Soluzioni: usa una "
-                "sessione anisette diversa/più recente, prova più tardi, oppure "
-                "configura un server anisette remoto nelle impostazioni."
-            )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            self._notify(f"[GSA] ✗ Apple ha risposto HTTP {resp.status_code} ({action})")
+            if action == "apptokens":
+                message = (f"Apple ha risposto HTTP {resp.status_code} alla richiesta del token "
+                           "di firma (apptokens)")
+            elif resp.status_code == 503:
+                message = (f"Apple ha risposto HTTP 503 a GsService2 ({action}): succede quando "
+                           "Apple rifiuta l'anisette usata (errori -80045/-80046) o quando i suoi "
+                           "server sono sovraccarichi")
+            else:
+                message = f"Risposta inattesa da GsService2 ({action}): HTTP {resp.status_code}"
+            raise GsaError(message, http_status=resp.status_code)
         data = plistlib.loads(resp.content)
         if "Response" not in data:
             raise GsaError("Risposta GSA non valida (nessun campo Response)")
@@ -215,6 +230,7 @@ class GsaClient:
         headers = dict(self._meta_headers())
         headers.update({k: v for k, v in anisette.items() if k.lower() != "x-mme-client-info"})
         headers["X-MMe-Client-Info"] = self.client_info(anisette)
+        headers["Connection"] = "close"  # vedi NEW_CONNECTION_NOTE
         return headers
 
     # --------------------------------------------------------------- 2FA
@@ -387,7 +403,23 @@ class GsaClient:
             "checksum": checksum,
             "o": "apptokens",
         }
-        resp = self._gsa_request(params)
+        for attempt in range(1, APPTOKENS_ATTEMPTS + 1):
+            try:
+                resp = self._gsa_request(params)
+                break
+            except GsaError as e:
+                if e.http_status not in RETRYABLE_STATUS:
+                    raise
+                if attempt == APPTOKENS_ATTEMPTS:
+                    raise GsaError(
+                        f"Apple ha rifiutato la richiesta del token di firma (apptokens, HTTP "
+                        f"{e.http_status}) per {attempt} volte di fila, anche con connessioni nuove",
+                        http_status=e.http_status,
+                    ) from e
+                wait = 2 * attempt
+                self._notify(f"[GSA] Riprovo apptokens tra {wait} s con una connessione nuova "
+                             f"(tentativo {attempt + 1}/{APPTOKENS_ATTEMPTS})…")
+                self._sleep(wait)
         et = resp.get("et")
         if not et:
             raise GsaError(f"Risposta apptokens senza 'et': {resp.get('Status')}")
@@ -425,12 +457,10 @@ class GsaClient:
             account_info=spd,
             sk=sk,
         )
-        # mint dello Xcode token per i servizi developer
-        try:
-            session.xcode_token = self.fetch_xcode_token(spd)
-            logger.info("Xcode token ottenuto (scadenza: %s)", self._token_expiry(spd))
-        except GsaError as e:
-            logger.warning("Xcode token non ottenibile: %s", e)
+        # mint dello Xcode token per i servizi developer: senza non si firma nulla,
+        # quindi l'errore (es. 503 su apptokens) arriva fino all'utente così com'è
+        session.xcode_token = self.fetch_xcode_token(spd)
+        logger.info("Xcode token ottenuto (scadenza: %s)", self._token_expiry(spd))
         if not session.logged_in:
             logger.warning("Cookie myacinfo assente nella risposta: la sessione potrebbe non funzionare per i servizi Apple")
         return session

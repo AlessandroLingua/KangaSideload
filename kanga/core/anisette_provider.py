@@ -102,8 +102,8 @@ class AnisetteProvider:
 
 class AutoAnisette:
     """Sceglie la fonte anisette: iTunes se le DLL Apple ci sono e funzionano,
-    altrimenti quella emulata. La scelta resta fissa per tutta la vita
-    dell'oggetto: login e servizi sviluppatore devono usare la stessa identità.
+    altrimenti quella emulata. La scelta resta fissa fino al login successivo:
+    login e servizi sviluppatore devono usare la stessa identità.
     """
 
     def __init__(self, mode: str | None = None, itunes_factory=None, emulated_factory=None):
@@ -122,29 +122,42 @@ class AutoAnisette:
         return ItunesAnisette()
 
     def _choose(self):
+        """Ritorna (fonte, header del tentativo di prova o None)."""
+        self.fallback_reason = ""
         if self.mode in ("emulata", "emulated", "anisette"):
             self.source = SOURCE_EMULATED
-            return self._emulated_factory()
+            return self._emulated_factory(), None
         try:
             impl = self._itunes_factory()
-            impl.get_headers()  # prova subito: se fallisce si ripiega sull'emulata
+            headers = impl.get_headers()  # prova subito: se fallisce si ripiega sull'emulata
         except Exception as e:
             if self.mode == "itunes":
                 raise AnisetteError(f"Anisette iTunes non disponibile: {e}") from e
             self.fallback_reason = str(e)
             logger.info("Anisette iTunes non disponibile (%s): uso quella emulata", e)
             self.source = SOURCE_EMULATED
-            return self._emulated_factory()
+            return self._emulated_factory(), None
         self.source = SOURCE_ITUNES
-        return impl
+        return impl, headers
 
     def get_headers(self) -> dict[str, str]:
         with self._lock:
             if self._impl is None:
-                self._impl = self._choose()
+                self._impl, first = self._choose()
                 logger.info("Fonte anisette: %s", self.source)
+                if first is not None:
+                    return dict(first)  # header appena generati dalla prova: niente doppia chiamata
             impl = self._impl
         return dict(impl.get_headers())
+
+    def retry_itunes(self) -> None:
+        """Se si sta usando l'emulata, alla prossima richiesta riprova le DLL di iTunes
+        (es. iTunes/iCloud installati mentre l'app era aperta). Da chiamare solo
+        all'inizio di un nuovo login, mai a metà di un'operazione."""
+        with self._lock:
+            if self._impl is not None and self.source == SOURCE_EMULATED and self.mode == "auto":
+                self._impl = None
+                self.source = ""
 
 
 _default: AutoAnisette | None = None

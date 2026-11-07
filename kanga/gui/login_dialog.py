@@ -90,6 +90,10 @@ class LoginDialog(QDialog):
         self._worker: LoginWorker | None = None
         self._busy = False
         self.session = None
+        # ultimo tentativo (apple_id, password, ricorda) ed eventuale errore (titolo, suggerimento):
+        # la finestra principale li usa per ripresentare il dialog già compilato
+        self.last_attempt: tuple[str, str, bool] | None = None
+        self.last_error: tuple[str, str] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 22)
@@ -301,6 +305,10 @@ class LoginDialog(QDialog):
             return
 
         self.err_credentials.hide()
+        # credenziali memorizzate PRIMA dell'esito: se Apple risponde con un errore
+        # (es. 503) restano disponibili per riprovare, e con «Ricorda» sono già su disco
+        self.last_attempt = (self.apple_id, self.password, self.remember)
+        self._store_credentials()
         self._set_busy(True, "Accesso in corso…")
         worker = LoginWorker(self._flow, self.apple_id, self.password)
         worker.status.connect(self._on_status)
@@ -344,9 +352,9 @@ class LoginDialog(QDialog):
 
     def _on_success(self, session) -> None:
         self.session = session
+        self.last_error = None
         self._set_busy(False, "")
         self._worker = None
-        self._store_credentials()
         self.accept()
 
     def _store_credentials(self) -> None:
@@ -367,10 +375,15 @@ class LoginDialog(QDialog):
         self._show_page(self.PAGE_CREDENTIALS)
         self.btn_submit.setText("Accedi")
         self._set_busy(False, "")
-        self.err_credentials.show_error(fe.title, fe.hint or fe.message)
-        self._fit()
+        self.last_error = (fe.title, fe.hint or fe.message)
+        self.show_error(*self.last_error)
         self.txt_password.setFocus()
         self.txt_password.selectAll()
+
+    def show_error(self, title: str, hint: str = "") -> None:
+        """Errore in evidenza sotto i campi (anche quello di un tentativo precedente)."""
+        self.err_credentials.show_error(title, hint)
+        self._fit()
 
     def _on_cancelled(self) -> None:
         self._worker = None

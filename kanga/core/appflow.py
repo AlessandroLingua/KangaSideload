@@ -24,9 +24,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import apple_services, device, store
-from .anisette_provider import AutoAnisette
+from .anisette_provider import SOURCE_EMULATED, AutoAnisette
 from .entitlements import free_provisioning_entitlements
-from .gsa import AppleSession, GsaClient
+from .gsa import AppleSession, GsaClient, GsaError
 from .ipa import read_ipa_info
 from .signer import sign_ipa
 
@@ -123,8 +123,20 @@ class AppFlow:
 
     def login(self, apple_id: str, password: str, on_2fa=None) -> AppleSession:
         self.log(f"Autenticazione con Apple (GSA) per {apple_id}…")
+        if hasattr(self.anisette, "retry_itunes"):
+            self.anisette.retry_itunes()  # nuovo login: riprova iTunes se prima mancava
         client = GsaClient(self._logged_anisette(), on_event=self.log)
-        apple_session = client.login(apple_id, password, on_2fa=on_2fa)
+        try:
+            apple_session = client.login(apple_id, password, on_2fa=on_2fa)
+        except GsaError as e:
+            text = str(e)
+            blocked = "503" in text or "-80045" in text or "-80046" in text
+            if blocked and getattr(self.anisette, "source", "") == SOURCE_EMULATED:
+                # il blocco Apple colpisce l'anisette emulata: la soluzione è quella di iTunes
+                reason = getattr(self.anisette, "fallback_reason", "") or "DLL Apple non disponibili"
+                raise GsaError(f"{text} [anisette emulata: {reason}]",
+                               apple_code=e.apple_code) from e
+            raise
         if not apple_session.xcode_token:
             raise AppFlowError(
                 "Login riuscito ma Xcode token non ottenuto: i servizi di firma non sono disponibili"

@@ -67,3 +67,24 @@ def test_html_page_is_rejected(appdata, monkeypatch):
     monkeypatch.setattr(downloads.requests, "get", lambda *a, **k: FakeResponse(b"<html>", "text/html"))
     with pytest.raises(downloads.DownloadError, match="HTML"):
         downloads.fetch_tool_ipa(find_tool("phoenix"))
+
+
+def test_bad_download_is_retried_once(appdata, monkeypatch):
+    good = _zip_bytes()
+    replies = [FakeResponse(b"<Error>SlowDown</Error>", "application/xml"), FakeResponse(good)]
+    monkeypatch.setattr(downloads.requests, "get", lambda *a, **k: replies.pop(0))
+    path = downloads.fetch_tool_ipa(find_tool("phoenix"))
+    assert path.read_bytes() == good and replies == []
+
+
+def test_incomplete_download_is_rejected(appdata, monkeypatch, tmp_path):
+    body = _zip_bytes()
+
+    def short(*a, **k):
+        r = FakeResponse(body)
+        r.headers["Content-Length"] = str(len(body) + 100)  # la connessione si è chiusa prima
+        return r
+
+    monkeypatch.setattr(downloads.requests, "get", short)
+    with pytest.raises(downloads.DownloadError, match="incompleto"):
+        downloads.download_url("https://example.com/x.ipa", tmp_path / "x.ipa")

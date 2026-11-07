@@ -48,6 +48,7 @@ from ..core.ipa import IpaError, IpaInfo, read_ipa_info
 from ..core.signer import readable_size
 from . import format as fmt
 from . import icons, theme
+from .firmware_page import FirmwarePage
 from .jailbreak_page import JailbreakPage
 from .login_dialog import LoginDialog
 from .theme import set_prop
@@ -58,11 +59,12 @@ from .workers import FlowBridge, start_worker
 
 logger = logging.getLogger(__name__)
 
-PAGE_INSTALL, PAGE_RECENT, PAGE_JAILBREAK, PAGE_LOG = 0, 1, 2, 3
+PAGE_INSTALL, PAGE_RECENT, PAGE_JAILBREAK, PAGE_FIRMWARE, PAGE_LOG = 0, 1, 2, 3, 4
 NAV_PAGES = [
     ("Installa", "package"),
     ("Recenti", "clock"),
     ("Jailbreak", "unlock"),
+    ("Firmware", "cpu"),
     ("Registro", "terminal"),
 ]
 POLL_INTERVAL_MS = 2500
@@ -89,7 +91,7 @@ def _scroll_page(content: QWidget, max_width: int = 820) -> QScrollArea:
 
 class MainWindow(QMainWindow):
     def __init__(self, flow: AppFlow | None = None, devices=None,
-                 settings: QSettings | None = None, auto_refresh: bool = True):
+                 settings: QSettings | None = None, auto_refresh: bool = True, firmware=None):
         super().__init__()
         self.setWindowTitle("Kanga Sideload")
         self.setWindowIcon(icons.app_icon())
@@ -102,6 +104,9 @@ class MainWindow(QMainWindow):
         self.flow = flow or AppFlow()
         self.flow.on_event = self._bridge.emit
         self.devices = devices or device_mod
+        self._firmware_backend = firmware
+        self._firmware_busy = False
+        self._busy_text = "Installazione in corso"
 
         self._devices: list[DeviceInfo] = []
         self._known_serials: list[str] | None = None
@@ -131,6 +136,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_install_page())
         self.pages.addWidget(self._build_recent_page())
         self.pages.addWidget(self._build_jailbreak_page())
+        self.pages.addWidget(self._build_firmware_page())
         self.pages.addWidget(self._build_log_page())
         rl.addWidget(self.pages, 1)
         self.setCentralWidget(root)
@@ -350,6 +356,17 @@ class MainWindow(QMainWindow):
         self.jailbreak.installRequested.connect(self.install_from_file)
         return _scroll_page(self.jailbreak)
 
+    def _build_firmware_page(self) -> QWidget:
+        self.firmware = FirmwarePage(backend=self._firmware_backend)
+        self.firmware.logMessage.connect(self._log)
+        self.firmware.busyChanged.connect(self._on_firmware_busy)
+        return _scroll_page(self.firmware)
+
+    def _on_firmware_busy(self, busy: bool) -> None:
+        self._firmware_busy = busy
+        self._busy_text = "Ripristino del firmware in corso" if busy else "Installazione in corso"
+        self._set_busy(busy)
+
     def _build_log_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("Page")
@@ -407,6 +424,8 @@ class MainWindow(QMainWindow):
     def show_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
+        if index == PAGE_FIRMWARE:
+            self.firmware.activate()
 
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -675,6 +694,7 @@ class MainWindow(QMainWindow):
             self.btn_pair.setEnabled(not self._busy)
         self.card_device.set_done(d is not None and d.trusted)
         self.jailbreak.set_device(d)
+        self.firmware.set_device(d)
         self._update_ready()
 
     def _poll_devices(self) -> None:
@@ -811,7 +831,7 @@ class MainWindow(QMainWindow):
         missing = self.requirements()
         self.btn_install.setEnabled(not missing and not self._busy)
         if self._busy:
-            text, icon_name, color = "Installazione in corso: tieni il dispositivo collegato.", "clock", t.accent
+            text, icon_name, color = f"{self._busy_text}: tieni il dispositivo collegato.", "clock", t.accent
         elif missing:
             text = "Per continuare: " + fmt.join_requirements(missing) + "."
             icon_name, color = "info", t.muted
@@ -833,7 +853,9 @@ class MainWindow(QMainWindow):
         for item in self.recent_items:
             item.btn_reinstall.setEnabled(not busy and item.property("canReinstall") is True)
         self.jailbreak.set_busy(busy)
-        self.btn_install.setText("Installazione in corso…" if busy else "Firma e installa")
+        # se il blocco viene dal ripristino del firmware, la sua pagina resta attiva
+        self.firmware.set_busy(busy and not self._firmware_busy)
+        self.btn_install.setText(f"{self._busy_text}…" if busy else "Firma e installa")
         self._update_ready()
 
     def start_install(self) -> None:
@@ -1051,8 +1073,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self._busy:
             answer = QMessageBox.question(
-                self, "Installazione in corso",
-                "Un'installazione è ancora in corso. Chiudendo ora verrà interrotta.\n\nChiudere comunque?",
+                self, self._busy_text,
+                f"{self._busy_text}. Chiudendo ora verrà interrotta"
+                + (" e il dispositivo potrebbe restare in modalità Recovery" if self._firmware_busy else "")
+                + ".\n\nChiudere comunque?",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 e.ignore()

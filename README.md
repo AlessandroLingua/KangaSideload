@@ -96,8 +96,53 @@ e installa» prende l'IPA dalla fonte ufficiale (cache in
 `%LOCALAPPDATA%/Kanga/downloads/`) e lo passa a «Firma e installa». Per i tool
 il cui sito originale è offline c'è «Installa IPA…» con un file scelto da te.
 
+La sezione **Firmware** funziona con **qualsiasi iPhone, iPad o iPod touch**:
+il modello del dispositivo collegato oppure uno qualsiasi scelto da un elenco con
+ricerca (181 modelli, da api.ipsw.me), anche senza nulla di collegato. Mostra
+**tutte le versioni di iOS** pubblicate da Apple per quel modello e quali sono
+**ancora firmate**. Tutte si possono scaricare; si possono *installare* solo
+quelle firmate, come con iTunes/3uTools/Finder, perché ogni ripristino deve
+essere autorizzato in tempo reale dai server Apple (TSS). Di solito Apple firma
+l'ultima versione e, per qualche giorno dopo un aggiornamento, anche la
+precedente: è la finestra per un **downgrade**, che la sezione segnala.
+
+- **Scarica IPSW** (qualsiasi versione, anche non firmata) dai server Apple, con
+  ripresa del download e verifica SHA-256 (cache in `%LOCALAPPDATA%/Kanga/ipsw/`)
+- **Salva SHSH** (versioni firmate, dispositivo via cavo USB): i ticket di firma
+  di Apple in `%LOCALAPPDATA%/Kanga/shsh/<ECID>/`; le versioni con SHSH salvati
+  sono segnalate. Servono a futurerestore per installare in futuro una versione
+  non più firmata (con i suoi limiti di compatibilità SEP/baseband)
+- **Ripristina**: con **iTunes** (consigliato su Windows: Kanga apre iTunes e
+  mostra il file, poi Maiusc + «Ripristina iPhone…») oppure **direttamente da
+  Kanga** con pymobiledevice3, che su Windows richiede `libusb-1.0.dll` in
+  `%LOCALAPPDATA%/Kanga/libusb/` e il driver WinUSB per la modalità Recovery
+  (es. con Zadig). Il ripristino cancella tutti i dati
+
+**Downgrade a versioni non firmate (futurerestore).** Per una versione che Apple
+non firma più, con l'IPSW scaricato e il dispositivo di quel modello collegato
+via USB, compare «Ripristina con SHSH…». Kanga usa
+[futurerestore](https://github.com/m1stadev/futurerestore/releases), che scegli
+tu (Kanga non scarica eseguibili da server di terzi), e prima di avviarlo
+controlla:
+
+- che gli SHSH (quelli salvati da Kanga o un file `.shsh2` scelto da te) siano di
+  **questo** dispositivo (ECID): altrimenti il ripristino è bloccato
+- che il loro **nonce** coincida con quello attuale del dispositivo: se no avvisa
+  che serve impostarlo al generator degli SHSH (jailbreak, oppure pwned DFU sui
+  chip A7-A11 con l'opzione `--use-pwndfu --set-nonce`)
+- modem presente o no (`--latest-baseband` / `--no-baseband`); SEP più recente
+  (`--latest-sep`): se non è compatibile con la versione scelta, futurerestore
+  fallisce
+- una conferma esplicita del backup, perché tutti i dati vengono cancellati
+
+L'output di futurerestore finisce nel Registro; se fallisce, «Esci da Recovery»
+riavvia il dispositivo con il sistema di prima. Nota: futurerestore e iTunes
+usano i driver Apple; se per il ripristino diretto di Kanga hai installato il
+driver WinUSB (Zadig) per la modalità Recovery, loro non vedranno più il
+dispositivo in Recovery finché non rimetti il driver Apple.
+
 Scorciatoie: `Ctrl+O` scegli IPA · `F5` cerca dispositivi · `Ctrl+Invio`
-firma e installa · `Ctrl+1/2/3/4` cambia sezione.
+firma e installa · `Ctrl+1…5` cambia sezione.
 
 Il tema chiaro/scuro segue quello di Windows (forzabile con
 `KANGA_THEME=light|dark`).
@@ -193,11 +238,14 @@ kanga/
 │   ├── devices_catalog.py modelli Apple -> nome, chip, architettura
 │   ├── jailbreak_catalog.py  matrice tool jailbreak × modello × iOS
 │   ├── downloads.py       download IPA dalle fonti ufficiali
+│   ├── firmware.py        versioni firmate, IPSW, SHSH, ripristino
 │   ├── store.py           sessione, storico, credenziali DPAPI in %LOCALAPPDATA%
 │   └── _vendor/srp/       SRP-6a (cocagne/pysrp, MIT)
 ├── gui/                   PySide6
-│   ├── main_window.py     finestra (Installa · Recenti · Jailbreak · Registro)
+│   ├── main_window.py     finestra (Installa · Recenti · Jailbreak · Firmware · Registro)
 │   ├── jailbreak_page.py  sezione Jailbreak
+│   ├── futurerestore_dialog.py  downgrade con SHSH (controlli + avvio)
+│   ├── firmware_page.py   sezione Firmware (downgrade/ripristino)
 │   ├── login_dialog.py    login + 2FA + «Ricorda la password»
 │   ├── workers.py         thread di lavoro (risultati sempre sul thread UI)
 │   ├── widgets.py         card, drop zone, step, banner

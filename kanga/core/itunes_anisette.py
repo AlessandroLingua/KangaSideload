@@ -166,7 +166,11 @@ class ItunesAnisette:
     @staticmethod
     def _python_for(arch: str) -> Path:
         if arch == python_arch():
-            return Path(sys.executable)
+            exe = Path(sys.executable)
+            # avviata con doppio clic l'app gira in pythonw.exe: per leggere l'output
+            # dell'helper serve il python.exe "da console" accanto (la finestra resta nascosta)
+            console = exe.with_name("python.exe")
+            return console if exe.name.lower() == "pythonw.exe" and console.is_file() else exe
         py32 = base_dir() / "py32" / "python.exe"
         if arch == "x86" and py32.is_file():
             return py32

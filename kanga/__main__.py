@@ -18,12 +18,35 @@ def _windows_app_id() -> None:
         pass
 
 
+def _setup_logging() -> None:
+    """Console (se c'è) + file %LOCALAPPDATA%/Kanga/kanga.log: avviata con doppio clic
+    (pythonw) l'app non ha console, e senza file un errore all'avvio sparirebbe."""
+    from logging.handlers import RotatingFileHandler
+
+    from .core.store import base_dir
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    handlers: list[logging.Handler] = []
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
+    try:
+        base_dir().mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(base_dir() / "kanga.log", maxBytes=1_000_000, backupCount=2,
+                                            encoding="utf-8"))
+    except OSError:
+        pass
+    for h in handlers:
+        h.setFormatter(fmt)
+    logging.basicConfig(level=logging.INFO, handlers=handlers or [logging.NullHandler()])
+
+    def excepthook(exc_type, exc, tb):
+        logging.getLogger("kanga").critical("Errore non gestito", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = excepthook
+
+
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _setup_logging()
     from PySide6.QtWidgets import QApplication
 
     from . import __version__

@@ -62,6 +62,17 @@ zsign» nella barra in basso) oppure una tantum da riga di comando:
 
 ## Uso
 
+Doppio clic su **`Avvia Kanga.bat`** nella cartella del progetto: l'app si apre
+senza finestra del terminale (il registro tecnico finisce in
+`%LOCALAPPDATA%/Kanga/kanga.log`). Per un collegamento sul Desktop con l'icona
+di Kanga (da rifare se sposti la cartella):
+
+```bash
+.venv/Scripts/python.exe scripts/crea_collegamento.py
+```
+
+Da terminale:
+
 ```bash
 .venv/Scripts/python.exe -m kanga
 ```
@@ -254,6 +265,7 @@ kanga/
     ├── itunes_anisette_helper.py  carica le DLL Apple in un processo separato
     └── zsign/             binario scaricato da scripts/fetch_zsign.py
 scripts/fetch_zsign.py     download di zsign da riga di comando
+scripts/crea_collegamento.py  collegamento sul Desktop con icona
 tests/                     suite pytest (servizi Apple, iPhone e zsign simulati)
 docs/                      screenshot del README
 ```
